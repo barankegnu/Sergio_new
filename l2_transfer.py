@@ -38,46 +38,84 @@ V_LEO = np.sqrt(GM_E / (RE + H_PARK)) / KM / V_U        # circular speed, synodi
 
 # ------------------------------------------------------------------- CR3BP
 # --------------------------------------------------- optional perturbations
-# None = pure CR3BP.  Set by l2_perturb.py to measure what each effect costs.
-SRP = None        # dict(CR=1.3, A_m=area/mass in m2/kg) or None
-MOON = None       # dict(a=AU, e, i=rad, Om=rad, w=rad, n=sidereal rad/TU, ph=rad)
+# All None = pure CR3BP (the path that produced result.txt).  l2_perturb.py sets them.
+SRP = None        # dict(CR=1.3, A_m=area/mass in m2/kg)
+MOON = None       # dict(a=AU, e, i=rad, n=sidereal rad/TU, ph=rad, Omdot, wdot  [rad/TU])
+SUN_E = None      # dict(e=Earth orbital eccentricity, M0=mean anomaly at t=0)
 
 
 def moon_pos(t):
-    """Moon's geocentric position in the ROTATING frame (ecliptic + 5.1 deg tilt).
-    shortcut: the node and apsidal lines are held fixed (they regress in 18.6 yr and
-    evolve in 8.85 yr, both slow against a 140-day leg); true anomaly is 1st order in e."""
+    """Moon's geocentric position in the rotating frame: inclined (5.145 deg) ellipse
+    whose node regresses (18.6 yr) and whose apsidal line advances (8.85 yr).
+    shortcut: true anomaly is 1st order in e (e_M = 0.055 -> < 0.4 deg of position)."""
     m = MOON
-    Mn = m["n"] * t + m["ph"]                          # mean anomaly
+    Mn = m["n"] * t + m["ph"]
     nu = Mn + 2 * m["e"] * np.sin(Mn)
     r = m["a"] * (1 - m["e"] * np.cos(Mn))
-    u = nu + m["w"]                                    # argument of latitude
-    lam = m["Om"] + np.arctan2(np.cos(m["i"]) * np.sin(u), np.cos(u))
+    w = m.get("w", 0.0) + m.get("wdot", 0.0) * t
+    Om = m.get("Om", 0.0) + m.get("Omdot", 0.0) * t
+    u = nu + w
+    lam = Om + np.arctan2(np.cos(m["i"]) * np.sin(u), np.cos(u))
     bet = np.arcsin(np.sin(m["i"]) * np.sin(u))
-    ang = lam - t                                      # -> rotating frame
+    ang = lam - t
     return np.array([r * np.cos(bet) * np.cos(ang),
                      r * np.cos(bet) * np.sin(ang),
                      r * np.sin(bet)])
 
 
+def kep(t, e, M0=0.0):
+    """Earth's true anomaly minus mean anomaly, and radius (relative orbit, a = 1)."""
+    Mn = (t + M0) % (2 * np.pi)
+    E = Mn
+    for _ in range(12):
+        E -= (E - e * np.sin(E) - Mn) / (1 - e * np.cos(E))
+    nu = 2 * np.arctan2(np.sqrt(1 + e) * np.sin(E / 2), np.sqrt(1 - e) * np.cos(E / 2))
+    R = (1 - e * np.cos(E))
+    return nu - Mn, R, nu
+
+
+def primaries(t):
+    """(Sun, Earth, Earth inertial velocity) in the rotating frame, which turns at the
+    constant mean motion omega = 1.  With e = 0 this is exactly the circular CR3BP."""
+    if SUN_E is None:
+        return (np.array([-MU, 0.0, 0.0]), np.array([1 - MU, 0.0, 0.0]),
+                np.array([0.0, 1 - MU, 0.0]))
+    psi, R, nu = kep(t, e=SUN_E["e"], M0=SUN_E.get("M0", 0.0))
+    h = np.sqrt(1 - SUN_E["e"]**2)
+    nud = h / R**2                                     # nu_dot, angular momentum h
+    Rd = R * SUN_E["e"] * np.sin(nu) * nud / (1 + SUN_E["e"] * np.cos(nu))
+    c, s = np.cos(psi), np.sin(psi)
+    re_ = (1 - MU) * np.array([R * c, R * s, 0.0])
+    ve = (1 - MU) * (Rd * np.array([c, s, 0.0]) + R * nud * np.array([-s, c, 0.0]))
+    return -MU * np.array([R * c, R * s, 0.0]), re_, ve
+
+
+def third(p, origin, gm):
+    """tidal form: direct attraction minus the same pull on the central (geocentric) body."""
+    d = p - origin
+    return -gm * (d / np.dot(d, d)**1.5 - origin / np.dot(origin, origin)**1.5)
+
+
 def accel(s, t=0.0):
     """rotating-frame acceleration; Sun at (-mu,0,0), Earth at (1-mu,0,0), omega=1"""
-    x, y, z = s[0], s[1], s[2]
-    r1 = np.hypot(np.hypot(x + MU, y), z)
-    r2 = np.hypot(np.hypot(x - 1 + MU, y), z)
-    a = np.array([2 * s[4] + x - (1 - MU) * (x + MU) / r1**3 - MU * (x - 1 + MU) / r2**3,
-                  -2 * s[3] + y - (1 - MU) * y / r1**3 - MU * y / r2**3,
-                  -((1 - MU) * z / r1**3 + MU * z / r2**3)])
-    if SRP is not None:                 # radial away from the Sun, ~1/r1^2, no shadow
+    rs, re_, _ = primaries(t)
+    p = np.array(s[0:3])
+    d1, d2 = p - rs, p - re_
+    n1, n2 = np.linalg.norm(d1), np.linalg.norm(d2)
+    if SUN_E is None:                                  # exact circular CR3BP form
+        x, y = s[0], s[1]
+        a = np.array([2 * s[4] + x, -2 * s[3] + y, 0.0])
+        a += -(1 - MU) * d1 / n1**3 - MU * d2 / n2**3
+    else:                 # frame turns at the MEAN motion while the line of centres does
+        a = np.array([2 * s[4] + s[0], -2 * s[3] + s[1], 0.0])   # omega x (omega x r): no z
+        a += -(1 - MU) * d1 / n1**3 - MU * d2 / n2**3
+    if SRP is not None:                 # radial away from the Sun, ~1/r1^2
         k = 4.54e-6 * SRP["CR"] * SRP["A_m"] / (GM_S / AU**2)     # a_SRP / a_gravSun(1 AU)
-        a += k * (1 - MU) * np.array([x + MU, y, z]) / r1**3
-    if MOON is not None:                # third body, geocentric: direct MINUS indirect
-        # (the Earth is accelerated by the Moon too; without this term the same geometry
-        #  misprices dv2 by O(100) m/s - see l2_perturb.py)
-        rm = moon_pos(t)
-        gm = np.array([x - (1 - MU), y, z]) - rm
-        dm = np.linalg.norm(gm)
-        a -= MU_MOON * (gm / dm**3 - rm / np.dot(rm, rm)**1.5)
+        a += k * (1 - MU) * d1 / n1**3
+    if MOON is not None:
+        # geocentric frame: the Earth is pulled by the Moon too, so only the tidal part
+        # survives (dropping the indirect term moves dv2 by ~175 m/s on the same geometry)
+        a += third(p - re_, moon_pos(t), MU_MOON)
     return a
 
 
@@ -85,9 +123,12 @@ def rhs(t, s):
     return np.concatenate([s[3:6], accel(s, t)])
 
 
-def pot(s):
-    r1 = np.hypot(np.hypot(s[0] + MU, s[1]), s[2])
-    r2 = np.hypot(np.hypot(s[0] - 1 + MU, s[1]), s[2])
+def pot(s, t=0.0):
+    """pseudo-potential of the *circular* CR3BP; with SUN_E set it uses the true
+    instantaneous primary positions (energy-matching only - C is not conserved then)."""
+    rs, re_, _ = primaries(t)
+    r1 = np.linalg.norm(s[0:3] - rs)
+    r2 = np.linalg.norm(s[0:3] - re_)
     return 0.5 * (s[0]**2 + s[1]**2) + (1 - MU) / r1 + MU / r2
 
 
@@ -180,8 +221,9 @@ def dep_state(theta, u):
     (r = R_P), velocity along the parking direction => dv1 = u - V_LEO, no plane change"""
     r_hat = np.cos(theta) * X_HAT + np.sin(theta) * E_LEO
     v_hat = -np.sin(theta) * X_HAT + np.cos(theta) * E_LEO
-    r = np.array([1 - MU, 0.0, 0.0]) + R_P * r_hat
-    v_rot = np.array([0.0, 1 - MU, 0.0]) + u * v_hat - np.array([0.0, r[0], 0.0])
+    rs, re_, ve = primaries(0.0)
+    r = re_ + R_P * r_hat
+    v_rot = ve + u * v_hat - np.array([0.0, r[0], 0.0])       # - omega x r, omega = 1
     return np.concatenate([r, v_rot])
 
 
@@ -236,6 +278,11 @@ def self_check():
     assert abs(V_LEO * V_U - 7.788) < 0.01, V_LEO * V_U
     assert abs(RHO * KMD - (MU / 3)**(1 / 3) * KMD) / RHO / KMD < 0.01
     assert abs(C_L2 - 3.0008867) < 1e-6, C_L2
+    q = np.array([1.002, 0.003, -0.0004, 0.05, -0.02, 0.01])   # elliptic branch must
+    a0 = accel(q, 0.7)                                         # degenerate to circular
+    globals()["SUN_E"] = dict(e=0.0)
+    assert np.allclose(a0, accel(q, 0.7), atol=1e-13)
+    globals()["SUN_E"] = None
     o = halo_family([2.5e-4], n=200)[0]                    # one halo orbit
     s, T, C0 = o["s0"], o["T"], o["C"]
     assert np.linalg.norm(fly(s, T, 1e-13)[:3] - s[:3]) * KMD < 1.0   # closure < 1 km
@@ -244,7 +291,8 @@ def self_check():
     assert max(abs(jacobi(tr[:, k]) - C0) for k in range(tr.shape[1])) < 1e-9
     u = u_for_jacobi(0.0, C0)
     assert abs((u - V_LEO) * V_U - 3.19) < 0.05, u           # dv1 ~ 3.2 km/s
-    print("self_check OK: v_NOO, L2, C(L2), замыкание гало, интеграл Якоби, dv1")
+    print("self_check OK: v_NOO, L2, C(L2), e=0 предельный случай, замыкание гало,")
+    print("  интеграл Якоби, dv1")
 
 
 def main():
@@ -327,10 +375,10 @@ def main():
           % ((r["dv1"] + r["dv2"]) * V_U * 1000, r["tof"],
              M_SC * (1 - np.exp(-(r["dv1"] + r["dv2"]) * V_U * 1000 / (330 * 9.80665))),
              M_SC * (1 - np.exp(-(r["dv1"] + r["dv2"]) * V_U * 1000 / (220 * 9.80665)))))
-    print("  вне рамок расчёта: удержание на гало (~м/с/год), J2 и стартовая площадка,")
-    print("  реальная (не круговая) орбита Земли. Давление Солнца и Луна посчитаны")
-    print("  в l2_perturb.py на этой же трассе: dv1 не меняется, доплата идёт в dv2")
-    print("  (величины - в perturb.txt).")
+    print("  Давление Солнца, Луна (наклонение, эксцентриситет, прецессии узла и апсид),")
+    print("  эксцентриситет орбиты Земли посчитаны в l2_perturb.py на этой же трассе;")
+    print("  там же оценки J2/площадки и удержания на гало (perturb.txt). Влияние на")
+    print("  dv1: SRP и Луна - ~0, эксцентриситет Земли +33 м/с; всё остальное в dv2.")
 
 
 if __name__ == "__main__":
