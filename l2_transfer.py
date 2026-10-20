@@ -24,8 +24,10 @@ from scipy.optimize import brentq, fsolve, minimize
 
 # ----------------------------------------------------------------- constants
 GM_S, GM_E = 1.32712440018e20, 3.986004418e14          # m3/s2
+GM_M = 4.9048695e12                                     # m3/s2 (Moon)
 AU, RE, KM = 1.495978707e11, 6371e3, 1e3               # m, m, m
 MU = GM_E / (GM_S + GM_E)                               # Earth / (Sun + Earth)
+MU_MOON = GM_M / (GM_S + GM_E)                          # Moon GM in synodic units
 N_ORB = np.sqrt((GM_S + GM_E) / AU**3)                  # Earth mean motion, 1/s
 T_U, V_U = 1.0 / N_ORB, N_ORB * AU / KM                 # CR3BP time (s), vel (km/s)
 DAY, KMD = T_U / 86400.0, AU / KM                       # TU in days, AU in km
@@ -35,18 +37,52 @@ R_P = (RE + H_PARK) / AU                                # perigee radius, AU
 V_LEO = np.sqrt(GM_E / (RE + H_PARK)) / KM / V_U        # circular speed, synodic
 
 # ------------------------------------------------------------------- CR3BP
-def accel(s):
+# --------------------------------------------------- optional perturbations
+# None = pure CR3BP.  Set by l2_perturb.py to measure what each effect costs.
+SRP = None        # dict(CR=1.3, A_m=area/mass in m2/kg) or None
+MOON = None       # dict(a=AU, e, i=rad, Om=rad, w=rad, n=sidereal rad/TU, ph=rad)
+
+
+def moon_pos(t):
+    """Moon's geocentric position in the ROTATING frame (ecliptic + 5.1 deg tilt).
+    shortcut: the node and apsidal lines are held fixed (they regress in 18.6 yr and
+    evolve in 8.85 yr, both slow against a 140-day leg); true anomaly is 1st order in e."""
+    m = MOON
+    Mn = m["n"] * t + m["ph"]                          # mean anomaly
+    nu = Mn + 2 * m["e"] * np.sin(Mn)
+    r = m["a"] * (1 - m["e"] * np.cos(Mn))
+    u = nu + m["w"]                                    # argument of latitude
+    lam = m["Om"] + np.arctan2(np.cos(m["i"]) * np.sin(u), np.cos(u))
+    bet = np.arcsin(np.sin(m["i"]) * np.sin(u))
+    ang = lam - t                                      # -> rotating frame
+    return np.array([r * np.cos(bet) * np.cos(ang),
+                     r * np.cos(bet) * np.sin(ang),
+                     r * np.sin(bet)])
+
+
+def accel(s, t=0.0):
     """rotating-frame acceleration; Sun at (-mu,0,0), Earth at (1-mu,0,0), omega=1"""
     x, y, z = s[0], s[1], s[2]
     r1 = np.hypot(np.hypot(x + MU, y), z)
     r2 = np.hypot(np.hypot(x - 1 + MU, y), z)
-    return np.array([2 * s[4] + x - (1 - MU) * (x + MU) / r1**3 - MU * (x - 1 + MU) / r2**3,
-                     -2 * s[3] + y - (1 - MU) * y / r1**3 - MU * y / r2**3,
-                     -(1 - MU) * z / r1**3 - MU * z / r2**3])
+    a = np.array([2 * s[4] + x - (1 - MU) * (x + MU) / r1**3 - MU * (x - 1 + MU) / r2**3,
+                  -2 * s[3] + y - (1 - MU) * y / r1**3 - MU * y / r2**3,
+                  -((1 - MU) * z / r1**3 + MU * z / r2**3)])
+    if SRP is not None:                 # radial away from the Sun, ~1/r1^2, no shadow
+        k = 4.54e-6 * SRP["CR"] * SRP["A_m"] / (GM_S / AU**2)     # a_SRP / a_gravSun(1 AU)
+        a += k * (1 - MU) * np.array([x + MU, y, z]) / r1**3
+    if MOON is not None:                # third body, geocentric: direct MINUS indirect
+        # (the Earth is accelerated by the Moon too; without this term the same geometry
+        #  misprices dv2 by O(100) m/s - see l2_perturb.py)
+        rm = moon_pos(t)
+        gm = np.array([x - (1 - MU), y, z]) - rm
+        dm = np.linalg.norm(gm)
+        a -= MU_MOON * (gm / dm**3 - rm / np.dot(rm, rm)**1.5)
+    return a
 
 
 def rhs(t, s):
-    return np.concatenate([s[3:6], accel(s)])
+    return np.concatenate([s[3:6], accel(s, t)])
 
 
 def pot(s):
@@ -163,12 +199,12 @@ def closest(interp, ts, Pf, Vf):
     return ts[i], d[i, j], np.linalg.norm(V[i] - Vf[j]), P[i], V[i]
 
 
-def leg(orb, theta, dC=0.0, tof_max=3.5, n1=200, n2=400):
+def leg(orb, theta, dC=0.0, tof_max=3.5, n1=200, n2=400, max_step=0.5):
     """one candidate transfer: coast with Jacobi constant C(orb) - dC.
     returns dict with dv1, dv2, gap (km), tof (days) and the arrival state."""
     u = u_for_jacobi(theta, orb["C"] - dC)
     sol = solve_ivp(rhs, (0, tof_max), dep_state(theta, u), method="DOP853",
-                    rtol=1e-9, atol=1e-11, max_step=0.5, dense_output=True)
+                    rtol=1e-9, atol=1e-11, max_step=max_step, dense_output=True)
     ts1 = np.linspace(0.15, tof_max, n1)
     t1, _, _, _, _ = closest(sol.sol, ts1, orb["P"], orb["V"])
     h = (ts1[-1] - ts1[0]) / n1
@@ -291,8 +327,10 @@ def main():
           % ((r["dv1"] + r["dv2"]) * V_U * 1000, r["tof"],
              M_SC * (1 - np.exp(-(r["dv1"] + r["dv2"]) * V_U * 1000 / (330 * 9.80665))),
              M_SC * (1 - np.exp(-(r["dv1"] + r["dv2"]) * V_U * 1000 / (220 * 9.80665)))))
-    print("  вне рамок расчёта: коррекции середины трассы, удержание на гало (~м/с/год),")
-    print("  давление Солнца, Луна и реальная (не круговая) орбита Земли.")
+    print("  вне рамок расчёта: удержание на гало (~м/с/год), J2 и стартовая площадка,")
+    print("  реальная (не круговая) орбита Земли. Давление Солнца и Луна посчитаны")
+    print("  в l2_perturb.py на этой же трассе: dv1 не меняется, доплата идёт в dv2")
+    print("  (величины - в perturb.txt).")
 
 
 if __name__ == "__main__":
