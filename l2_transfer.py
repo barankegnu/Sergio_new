@@ -42,10 +42,10 @@ DAY, KMD = T_U / 86400.0, AU / KM                       # TU in days, AU in km
 
 # --------------------------------------------------- исходные данные задания
 H_PARK, M_DRY = 200e3, 1800.0                    # высота НОО, м; сухая масса КА, кг
-SITE, I_LEO = "Восточный", 51.6               # наклонение НОО: как у прямых стартов
-#   с Восточного к МКС и у «Спектр-РГ» (Боровин и др.: i = 51,611 deg). Широту
-#   площадки не используем: важно только i_LEO >= широты, т.е. достижимо без
-#   разворота плоскости. Источник по наклонению - ../Sergio_doc, по широте - нет.
+SITE, I_LEO = "Восточный", 51.6                # наклонение НОО: принято как у прямых
+#   стартов с Восточного к МКС и как у «Спектр-РГ» (Боровин и др.: i = 51,611 deg).
+#   Широту площадки в расчёте НЕ используем: по открытым источникам она не
+#   подтверждена (см. README, «Чего в расчёте нет»).
 EPS_ECL = 23.44                                  # наклон эклиптики к экватору
 I_ECL = np.deg2rad(abs(I_LEO - EPS_ECL))         # плоскость НОО <-> эклиптики, min
 RB = dict(name="КВТК", ISP=445.0, M_DRY=1300.0)  # РБ делает dv1+dv2; ИСП и "сухая"
@@ -54,6 +54,9 @@ RB = dict(name="КВТК", ISP=445.0, M_DRY=1300.0)  # РБ делает dv1+dv2
 SKT = dict(name="СПД-100ВМ", ISP=1600.0, F=0.090, CAP_Y=100.0, LIFE_Y=5.0,
            RES_MNs=4.5e6, RES_H=15000.0, RES_IGN=13000.0)   # 36-55.pdf, табл. 3
 G0 = 9.80665
+GAP_OK_KM = 500.0       # "трасса попала на орбиту": промах по месту, км (3e-4 масштаба
+#   перелёта; меньше этого работа прицела не сходится, а остаток снимается коррекцией
+#   середины трассы, которую первое приближение не моделирует)
 R_P = (RE + H_PARK) / AU                                # perigee radius, AU
 V_LEO = np.sqrt(GM_E / (RE + H_PARK)) / KM / V_U        # circular speed, synodic
 
@@ -274,19 +277,24 @@ X_HAT = np.array([1.0, 0.0, 0.0])                         # Earth -> L2 directio
 
 def dep_state(theta, u):
     """state just after dv1: burn at the point of the parking orbit at angle theta
-    (r = R_P), velocity along the parking direction => dv1 = u - V_LEO, no plane change"""
+    (r = R_P), velocity along the parking direction => dv1 = u - V_LEO, no plane change.
+    u is the GEOCENTRIC INERTIAL speed; the rotating-frame velocity is
+    v_rot = v_inertial - omega x r, omega = z_hat, omega x r = (-y, x, 0)."""
     r_hat = np.cos(theta) * X_HAT + np.sin(theta) * E_LEO
     v_hat = -np.sin(theta) * X_HAT + np.cos(theta) * E_LEO
     rs, re_, ve = primaries(0.0)
     r = re_ + R_P * r_hat
-    v_rot = ve + u * v_hat - np.array([0.0, r[0], 0.0])       # - omega x r, omega = 1
+    v_rot = ve + u * v_hat - np.array([-r[1], r[0], 0.0])      # - omega x r, omega = 1
     return np.concatenate([r, v_rot])
 
 
 def u_for_jacobi(theta, C):
-    """geocentric speed at the burn point giving the Jacobi constant C."""
-    s = dep_state(theta, 0.0)
-    return np.sqrt(max(2 * pot(s) - C, 0.0))
+    """Geocentric speed at the burn point giving the Jacobi constant C - solved exactly
+    on jacobi(dep_state), because C uses the ROTATING-frame speed while u is inertial
+    (the old closed form u = sqrt(2*Omega - C) mixed the two: ~1 m/s of mis-bookkeeping).
+    shortcut: monotone in u for every start angle reachable from a 200 km orbit."""
+    return brentq(lambda u: jacobi(dep_state(theta, u)) - C,
+                  0.0, 3.0 * V_LEO + 0.5, xtol=1e-13, rtol=1e-14)
 
 
 def closest(interp, ts, Pf, Vf):
@@ -297,9 +305,14 @@ def closest(interp, ts, Pf, Vf):
     return ts[i], d[i, j], np.linalg.norm(V[i] - Vf[j]), P[i], V[i]
 
 
-def leg(orb, theta, dC=0.0, tof_max=3.5, n1=200, n2=400, max_step=0.5):
+def leg(orb, theta, dC=0.0, tof_max=3.5, n1=200, n2=400, max_step=0.5, must_brake=True):
     """one candidate transfer: coast with Jacobi constant C(orb) - dC.
-    returns dict with dv1, dv2, gap (km), tof (days) and the arrival state."""
+    must_brake: по заданию второй импульс ТОРМОЗНОЙ, т.е. трасса обязана прибывать с
+    избытком энергии над целевой орбитой. Реализовано ограничением ПОСТРОЕНИЯ (dC >= 0),
+    а не штрафом: штрафом оптимизатор упирался в стену и уходил на другую цель.
+    returns dict with dv1, dv2, gap (km), tof (days), braking and the arrival state."""
+    if must_brake:
+        dC = max(dC, 0.0)
     u = u_for_jacobi(theta, orb["C"] - dC)
     sol = solve_ivp(rhs, (0, tof_max), dep_state(theta, u), method="DOP853",
                     rtol=1e-9, atol=1e-11, max_step=max_step, dense_output=True)
@@ -308,28 +321,51 @@ def leg(orb, theta, dC=0.0, tof_max=3.5, n1=200, n2=400, max_step=0.5):
     h = (ts1[-1] - ts1[0]) / n1
     ts2 = np.linspace(max(0.15, t1 - h), min(tof_max, t1 + h), n2)
     t2, gap, dv2, arr, arrv = closest(sol.sol, ts2, orb["P"], orb["V"])
+    j = int(np.argmin(((orb["P"] - arr)**2).sum(1)))
+    v_t, v_o = np.linalg.norm(arrv), np.linalg.norm(orb["V"][j])
     return dict(orb=orb, theta=theta, dC=dC, u=u, dv1=u - V_LEO, dv2=dv2, gap=gap * KMD,
-                tof=t2 * DAY, arr=arr, arrv=arrv,
+                tof=t2 * DAY, arr=arr, arrv=arrv, v_target=v_o, braking=v_t >= v_o,
                 tot=(u - V_LEO + dv2) * V_U * 1000 + gap * KMD / 50.0)
 
 
-def aim_transfer(fam, n_theta=16, tol=1e-3, pool=None):
-    """coarse scan over the halo family and the launch epoch (best coarse result is
-    stored on every orbit), then a 2-parameter refinement (launch angle + energy
-    offset) of the best orbit of `pool` = the design target."""
-    coarse = None
-    for orb in fam:
-        for ith in range(n_theta):
-            r = leg(orb, 2 * np.pi * ith / n_theta)
-            if orb.get("best") is None or r["tot"] < orb["best"]["tot"]:
-                orb["best"] = r
-            if coarse is None or r["tot"] < coarse["tot"]:
-                coarse = r
-    c = min(pool or fam, key=lambda o: o["best"]["tot"])["best"]
-    r0 = minimize(lambda q: leg(c["orb"], q[0], q[1])["tot"],
+def refine(c, tol=1e-3, must_brake=True, maxiter=120):
+    """2-parameter local refinement (launch angle + energy offset) of one coarse seed."""
+    r0 = minimize(lambda q: leg(c["orb"], q[0], q[1], must_brake=must_brake)["tot"],
                   [c["theta"], c["dC"]], method="Nelder-Mead",
-                  options=dict(xatol=1e-5, fatol=tol, maxiter=120))
-    return leg(c["orb"], r0.x[0], r0.x[1]), coarse
+                  options=dict(xatol=1e-5, fatol=tol, maxiter=maxiter))
+    return leg(c["orb"], r0.x[0], r0.x[1], must_brake=must_brake)
+
+
+def aim_transfer(fam, n_theta=16, tol=1e-3, pool=None, brake_only=True):
+    """Coarse scan over the halo family and the launch epoch, then refinement of the
+    cheapest candidates.  `tot` in the scan is dv1+dv2 plus a smooth gap/50 penalty: it
+    is a SEED, never the criterion.  The design criterion is minimum refined dv among
+    eclipse-free members whose refined leg actually lands on the orbit (gap <= GAP_OK_KM)
+    and, since the assignment prescribes a BRAKING second impulse, arrives faster than
+    the target orbit (braking=True; enforced by construction in leg(), dC >= 0)."""
+    if brake_only:                       # re-scan with dC >= 0 so the seed respects the
+        for orb in fam:                  # braking requirement and the ordering is honest
+            orb["best"] = None
+            for ith in range(n_theta):
+                r = leg(orb, 2 * np.pi * ith / n_theta)
+                if orb["best"] is None or r["tot"] < orb["best"]["tot"]:
+                    orb["best"] = r
+    tried = []
+    for orb in sorted(pool or fam, key=lambda oo: oo["best"]["dv1"] + oo["best"]["dv2"]):
+        tried.append(refine(orb["best"], tol, maxiter=30))      # быстрый скрининг цели
+    br = [t for t in tried if t["braking"]]
+    if not br:                    # тормозного входа в этой части семьи просто нет
+        return min(tried, key=lambda x: x["tot"]), None, tried, False, 0
+    brs = sorted(br, key=lambda x: x["dv1"] + x["dv2"])
+    lead = [t for t in brs[:3] if t["dv1"] + t["dv2"] - brs[0]["dv1"] - brs[0]["dv2"]
+            < 30.0 / (V_U * 1000)]        # лидеры: в пределах 30 м/с от минимума
+    tried += [refine(t["orb"]["best"], tol) for t in lead]      # полное уточнение
+    fin = tried[-len(lead):]
+    ok = [t for t in fin if t["gap"] <= GAP_OK_KM and t["braking"]]
+    if ok:
+        best = min(ok, key=lambda t: t["dv1"] + t["dv2"])
+        return best, best, tried, True, len(lead)
+    return min(fin, key=lambda x: x["tot"]), None, tried, False, len(lead)
 
 
 # -------------------------------------------------------------------- report
@@ -351,6 +387,10 @@ def self_check():
     assert max(abs(jacobi(tr[:, k]) - C0) for k in range(tr.shape[1])) < 1e-9
     u = u_for_jacobi(0.0, C0)
     assert abs((u - V_LEO) * V_U - 3.19) < 0.05, u           # dv1 ~ 3.2 km/s
+    s_b = dep_state(0.0, u)
+    assert abs(jacobi(s_b) - C0) < 1e-12, jacobi(s_b) - C0   # импульс назначен точно
+    r_ = s_b[0:3]                                           # член omega x r на месте:
+    assert abs(s_b[3] - r_[1]) < 1e-9, s_b[3]                # u = 0 -> v_rot = ve - omega x r
     # тень: сама орбита внутри конуса полутени даёт затмение, снаружи - нет
     assert halo_family([0.5 * R_PEN_L2 / KMD], n=120)[0]["sh_pen"] > 0
     assert halo_family([2.0 * R_PEN_L2 / KMD], n=120)[0]["sh_pen"] == 0
@@ -370,6 +410,7 @@ def main():
     print("=" * 78)
     print("CR3BP Солнце-Земля:  mu = %.6e   1 TU = %.3f сут   1 VU = %.4f km/s"
           % (MU, DAY, V_U))
+    print("  1 а.е. = %.0f km" % (AU / KM))
     print("Точка L2: x = %.8f -> расстояние Земля-L2 = %.0f km   C(L2) = %.7f"
           % (X_L2, RHO * KMD, C_L2))
     print("   контроль: a*(mu/3)^(1/3) = %.0f km; линеаризация: lambda = %.4f,"
@@ -406,16 +447,34 @@ def main():
           % R_PEN_L2)
     print("   порог по расчитанной орбите (бинарный поиск): Az_min = %.0f km."
           % (z_free * KMD))
+    print("   за год радиус полутени у L2 меняется на +/- %.0f km (эллиптичность орбиты"
+          % ((696000.0 + RE / KM) / (AU / KM) * RHO * KMD * 0.016710))
+    print("   Земли): двукратный запас по порогу перекрывает это более чем в 100 раз.")
     print("   без затмений в семье: %s" % (", ".join("%.0f" % (oo["z"] * KMD) for oo in free)
                                            or "нет - самая крупная Az = %.0f km"
                                                % (fam[-1]["z"] * KMD)))
-    print("   взята орбита с Az = 2x Az_min (%.0f km): запас на ±1.7%%"
+    print("   кандидатом в сетку добавлена орбита Az = 2x Az_min (%.0f km): двукратный"
           % (2 * z_free * KMD))
-    print("   изменения расстояния Солнце-Земля за год и на наклон трассы.")
+    print("   запас по тени (год меняет радиус полутени лишь на ±%.0f km)."
+          % ((696000.0 + RE / KM) / (AU / KM) * RHO * KMD * 0.016710))
+    print("   выбор цели - минимум dv среди тех беззатменных, чья УТОЧНЁННАЯ трасса")
+    print("   попадает на орбиту (промах <= %.0f km); суррогат dv+промах/50 служит только"
+          % GAP_OK_KM)
+    print("   стартом для уточнения, критерием он не является.")
     pool = free or fam          # если затмений не избежать - выбирать по одному dv
 
-    r, coarse = aim_transfer(fam, pool=pool)
+    r, coarse, tried, landed, n_fin = aim_transfer(fam, pool=pool)
     o = r["orb"]
+    print("-" * 78)
+    print("Уточнение кандидатов (скрининг всех беззатменных, затем полное уточнение лидеров):")
+    print("  целевая Az, km   dv1+dv2, m/s   промах, km   тоф, сут   тормозн.?  статус")
+    for n_t, t in enumerate(tried):
+        st = "ВЫБРАНА" if t is r else ("полное" if n_t >= len(tried) - n_fin else "скрининг")
+        print("  %12.0f %12.1f %11.0f %9.1f      %-6s     %s"
+              % (t["orb"]["z"] * KMD, (t["dv1"] + t["dv2"]) * V_U * 1000, t["gap"], t["tof"],
+                 "да" if t["braking"] else "нет", st))
+    print("  схема задания (тормозной вход с промахом <= %.0f km) выполнена: %s"
+          % (GAP_OK_KM, "да" if landed else "НЕТ"))
     print("-" * 78)
     print("Грубый перебор (лучший по dv ход среди 16 углов старта):")
     print("  целевая Az, km   dv1, m/s   dv2, m/s   промах, km   тень")
@@ -425,7 +484,7 @@ def main():
               % (oo["z"] * KMD, b["dv1"] * V_U * 1000, b["dv2"] * V_U * 1000, b["gap"],
                  "нет" if oo["sh_pen"] == 0 else "есть"))
     cmin = min(fam, key=lambda o: o["best"]["tot"])
-    print("  минимум грубого перебора (dv + штраф за промах) по всей семье:"
+    print("  минимум грубого перебора (dv + штраф за промах, dC >= 0) по всей семье:"
           " Az = %.0f km, dv = %.1f m/s (промах %.0f km)"
           % (cmin["z"] * KMD, (cmin["best"]["dv1"] + cmin["best"]["dv2"]) * V_U * 1000,
              cmin["best"]["gap"]))
@@ -447,8 +506,35 @@ def main():
     print("  промах по месту прицеливания        = %6.0f km (после уточнения)" % r["gap"])
     print("  избыток энергии перелёта над C(орбиты): dC = %.2e" % r["dC"])
     print("  dv2 (тормозной)                   = %8.1f m/s" % (r["dv2"] * V_U * 1000))
+    j_in = int(np.argmin(((o["P"] - r["arr"])**2).sum(1)))
+    v_arr, v_orb = np.linalg.norm(r["arrv"]), np.linalg.norm(o["V"][j_in])
+    res = r["arrv"] - o["V"][j_in]
+    print("  |v| трассы в точке входа = %.4f km/s, |v| орбиты = %.4f km/s -> по модулям %s;"
+          " по невязке векторов dv2 = %.1f m/s"
+          % (v_arr * V_U, v_orb * V_U,
+             "тормозной" if v_arr > v_orb else "разгонный", r["dv2"] * V_U * 1000))
+    print("  доля невязки вне эклиптики в dv2 = %.1f%% (dv2 - невязка ВЕКТОРОВ скоростей)"
+          % (100 * abs(res[2]) / np.linalg.norm(res)))
+    unc = refine(o["best"], must_brake=False)          # что стоит требование "тормозной"
+    print("  если требуется только минимум dv (второй импульс может стать разгонным): dv = %.1f m/s (%+.1f), тоф %.1f сут,"
+          % ((unc["dv1"] + unc["dv2"]) * V_U * 1000,
+             (unc["dv1"] + unc["dv2"] - r["dv1"] - r["dv2"]) * V_U * 1000, unc["tof"]))
+    print("  |v| трассы %.4f против |v| орбиты %.4f km/s -> импульс %s."
+          % (np.linalg.norm(unc["arrv"]) * V_U, unc["v_target"] * V_U,
+             "тормозной" if unc["braking"] else "РАЗГОННЫЙ - схеме задания не отвечает"))
+    print("  В проект идёт вариант, удовлетворяющий заданию (второй импульс %s)."
+          % ("тормозной" if r["braking"] else "НЕ тормозной - см. предупреждение"))
+    if not landed:
+        print("  ВНИМАНИЕ: тормозного входа с промахом <= %.0f km найти не удалось; ниже -"
+              % GAP_OK_KM)
+        print("  лучшая из найденных трасс, но схему задания она НЕ удовлетворяет целиком.")
     print("  СУММАРНАЯ характеристическая скорость dv = %.1f m/s"
           % ((r["dv1"] + r["dv2"]) * V_U * 1000))
+    print("  критерий выбора цели: минимум уточнённого dv среди гало БЕЗ ЗАТМЕНИЙ, чья")
+    print("  трасса попадает на орбиту (промах %.0f km <= %.0f km) И прибывает быстрее"
+          " орбиты (второй импульс - тормозной, dC >= 0): выполнено %s."
+          % (r["gap"], GAP_OK_KM, "да" if r["braking"] and r["gap"] <= GAP_OK_KM else "НЕТ"))
+    print("  В грубом переборе штраф промах/50 м/с на 1 km - только старт для уточнения.")
 
     print("-" * 78)
     dv_rb = (r["dv1"] + r["dv2"]) * V_U * 1000      # перелёт целиком делает разгонный блок
@@ -490,6 +576,9 @@ def main():
     print("Контроль расчёта:")
     print("  постоянство интеграла Якоби: min %.10f  max %.10f (дрейф %.1e)"
           % (Cs.min(), Cs.max(), Cs.max() - Cs.min()))
+    print("  C coast vs C(орбиты) - dC: %.10f vs %.10f (разность %.1e)"
+          % (Cs.mean(), o["C"] - r["dC"],
+             Cs.mean() - (o["C"] - r["dC"])))
     print("  min r(Земля) на перелёте = %.0f km, min r(L2) = %.0f km"
           % (np.min(dist_earth(tr[0:3])) * KMD,
              np.min(np.hypot(np.hypot(tr[0] - X_L2, tr[1]), tr[2]) * KMD)))
@@ -498,16 +587,17 @@ def main():
     print("  замыкание гало-орбиты за период: невязка %.1e AU"
           % np.linalg.norm(fly(o["s0"], o["T"], 1e-12)[:3] - o["s0"][:3]))
     print("-" * 78)
-    print("ОТВЕТ: dv1 = %.0f m/s (разгонный с НОО), dv2 = %.0f m/s (тормозной, выход на"
-          % (r["dv1"] * V_U * 1000, r["dv2"] * V_U * 1000))
+    print("ОТВЕТ: dv1 = %.0f m/s (разгонный с НОО), dv2 = %.0f m/s (%s, выход на"
+          % (r["dv1"] * V_U * 1000, r["dv2"] * V_U * 1000,
+             "тормозной" if r["braking"] else "НЕ тормозной"))
     print("  гало у L2), суммарно dv = %.0f m/s; перелёт %.0f сут; целевая орбита"
           " Az = %.0f km (без затмений)"
           % ((r["dv1"] + r["dv2"]) * V_U * 1000, r["tof"], o["z"] * KMD))
     print("  масса: сухая КА %.0f kg, ксенон %.1f kg, топливо РБ %.0f kg (Isp %.0f s),"
           % (M_DRY, m_x, mp_nom, RB["ISP"]))
-    print("  ввести на НОО %.0f kg; dv удержания ~0.8 m/s/год - на 2 порядка ниже"
+    print("  ввести на НОО %.0f kg; dv удержания и проверка лимита 100 m/s/год - в"
           % (m_sc + RB["M_DRY"] + mp_nom))
-    print("  лимита 100 m/s/год (см. l2_perturb.py).")
+    print("  perturb.txt, раздел 6 (там же ресурс СПД-100ВМ и допуск, который лимиту равен).")
     print("  Давление Солнца, Луна (круговая орбита в эклиптике - форма и прецессии")
     print("  исключены по заданию), эксцентриситет орбиты Земли, наклонённая плоскость")
     print("  выведения и удержание на гало посчитаны в l2_perturb.py на этой же трассе.")

@@ -93,11 +93,17 @@ def comoving(sol, ts):
     return Q, QD
 
 
-def one_leg(orb, theta, dC, ts_n=2500, comove=False, ms=None):
+def one_leg(orb, theta, dC, ts_n=2500, comove=False, ms=None, must_brake=True):
     """integrate the coast once; dv1, dv2, gap (km), tof (d), min distance to the Moon,
     time spent in the Earth's shadow (s).  ms - шаг интегрирования (0.5 годится там,
     где нет лунного возмущения: в 5-10 раз быстрее)."""
-    u = L.u_for_jacobi(theta, orb["C"] - dC)
+    if must_brake:
+        dC = max(dC, 0.0)             # та же конструкция, что в leg(): второй импульс тормозной
+    try:
+        u = L.u_for_jacobi(theta, orb["C"] - dC)
+    except ValueError:                  # C выше края поверхности нулевой скорости (эр. орбита
+        return dict(dv1=np.nan, dv2=np.nan, gap=np.nan, tof=np.nan, dmo=np.nan,
+                    t_shadow=np.nan, t_day=np.nan, u=np.nan, res=np.zeros(3), tot=1e9)
     sol = solve_ivp(L.rhs, (0, TOF), L.dep_state(theta, u), method="DOP853",
                     rtol=1e-9, atol=1e-11, max_step=ms or MS, dense_output=True)
     Pt, Vt = orb["P"], orb["V"]
@@ -147,7 +153,7 @@ def reaim(orb, comove=False, ms=None):
     The active force model is whatever L.SRP / L.MOON / L.SUN_E are set to."""
     opt = minimize(lambda q: one_leg(orb, q[0], q[1], comove=comove, ms=ms)["tot"],
                    [TH, DC], method="Nelder-Mead",
-                   options=dict(xatol=1e-6, fatol=1e-3, maxiter=40))
+                   options=dict(xatol=1e-6, fatol=1e-3, maxiter=25))
     return one_leg(orb, opt.x[0], opt.x[1], comove=comove, ms=ms)
 
 
@@ -187,11 +193,12 @@ def main():
     print("   интеграл Якоби на радиусе НОО, а не направление импульса.")
     print("   dv2: наклон %.1f deg (Восточный, оптимум) против 0 deg - %+.1f m/s; наклон"
           % (I0, d_tot[1] - d_tot[0]))
-    print("   %.1f deg - %+.1f m/s; худший %.1f deg - %+.1f m/s. Доля невязки вне эклиптики"
+    print("   %.1f deg - %+.1f m/s; худший %.1f deg - %+.1f m/s."
           % (rows[2][0], d_tot[2] - d_tot[0], rows[3][0], d_tot[3] - d_tot[0]))
-    print("   растёт с наклоном (%.0f%% -> %.0f%%), т.е. это именно разворот плоскости,"
+    print("   Доля невязки вне эклиптики: %.0f%% при минимальном наклоне, %.0f%% при"
           % (zq_t[1], zq_t[3]))
-    print("   а не торможение. Разброс %.0f m/s между соседними наклонами - мера"
+    print("   узле - т.е. это разворот плоскости, а не торможение.")
+    print("   Разброс %.0f m/s между соседними наклонами - мера"
           % (max(d_tot) - min(d_tot)))
     print("   негладкости множества пересечений трассы с целью, а не эффект наклонения.")
     print("   ВЫВОД: при i_LEO = %.1f deg трасса в наклонённой плоскости стоит тех же ~100"
@@ -231,11 +238,18 @@ def main():
         L.SUN_E = None
         print("   %-10s  %.5f  %7.1f    %9.1f       %8.1f       %8.0f"
               % (name, (1 - 0.01671 * np.cos(M0)), a["dv1"], a["dv2"], b["dv2"], b["gap"]))
+    print("   (nan = при этой фазе C орбиты выше края поверхности нулевой скорости, т.е.")
+    print('    цель вообще недостижима с этого прицела - это невозможность, а не стоимость.')
     print("   ПЕРЕПРИЦЕЛИВАНИЕ (остаток dv2 - это НЕ стоимость эксцентриситета, а то,")
     print("   что гало-цель не является орбитой эллиптической задачи: в ER3BP орбиты у")
     print("   L2 квазипериодические и другого размера (r_L2 = R*(mu/3)^(1/3), ±1.7%).")
-    print("   Собственно цена эксцентриситета - в dv1 (см. столбец dv1 выше: %+.0f м/с)."
-          % (max(e_dv1) - nom["dv1"]))
+    print("   ЦЕНА ЭКСЦЕНТРИСИТЕТА В dv1 В ЭТОЙ МОДЕЛИ НЕ ИЗМЕРИМА: кадр вращается")
+    print("   средней движением, а цель взята из круговой задачи - отсюда фазовый")
+    ecc_sp = np.nanmax(e_dv1) - np.nanmin(e_dv1)
+    print("   разброс dv1 до %.0f м/с (столбец dv1 выше). Это мера" % ecc_sp)
+    print("   рассогласования модели с эллиптической задачей, а не стоимость:")
+    print("   корректный расчёт требует квазипериодических орбит ER3BP (вне объёма")
+    print("   первого приближения). В бюджет миссии он не входит.")
     for nm, M0 in (("перигей", 0.0), ("апогей", np.pi)):
         L.SUN_E = dict(e=0.016710, M0=M0)
         r = reaim(orb, comove=True)
@@ -265,11 +279,11 @@ def main():
     print("   верхняя оценка - сутки непрерывной тени. Для A = 20 м2 эффект на ~4 порядка")
     print("   ниже dv2, для A = 100 м2 - на 3; в динамику не вводится.")
     L.SRP = dict(CR=1.3, A_m=20.0 / L.M_DRY)
-    r = reaim(orb)
+    r = reaim(orb, ms=0.5)          # возмущения сглаженные: лунный шаг здесь не нужен
     print("   переприцеливание при A=20, C_R=1.3: dv = %.1f m/s (%+.1f к номиналу)"
           % (r["dv1"] + r["dv2"], r["dv1"] + r["dv2"] - nom["dv1"] - nom["dv2"]))
     L.SRP = dict(CR=1.8, A_m=100.0 / L.M_DRY)
-    r = reaim(orb)
+    r = reaim(orb, ms=0.5)
     print("   переприцеливание при A=100, C_R=1.8: dv = %.1f m/s (%+.1f)"
           % (r["dv1"] + r["dv2"], r["dv1"] + r["dv2"] - nom["dv1"] - nom["dv2"]))
     L.SRP = None
@@ -402,11 +416,22 @@ def main():
           % (100.0 / (1e3 * 100.0 / te * n_c) * 100.0))
     print("   задаёт не динамика, а допустимая ширина орбиты. Для сравнения: ACE (Боровин,")
     print("   Ильин и др.) - коррекции удержания раз в 8 нед, геометрии орбиты - раз в 3-6 мес.")
+    sk_yr = 1e3 * 100.0 / te * n_c                          # м/с/год при допуске +-100 km
+    assert sk_yr <= L.SKT["CAP_Y"], (sk_yr, L.SKT["CAP_Y"])   # требование задания, проверкой
+    print("   ПРОВЕРЕНО КОДОМ: %.2f м/с/год <= лимита %.0f м/с/год (assert)." % (sk_yr,
+                                                                                L.SKT["CAP_Y"]))
+    print("   Почему «по возможности минимальные» здесь = малый допуск: в CR3BP lambda -")
+    print("   свойство точки L2, а не выбранной орбиты, так что бюджет удержания от")
+    print("   амплитуды гало не зависит; он линеен по допуску и снимается только")
+    print("   затмениями (сброс давления Солнца раз в период - ошибка, которую приходится")
+    print("   вычитать коррекциями): от них целевая орбита и выбрана (п. 1-3 result.txt).")
     print("-" * 78)
     print("ИТОГ по dv = %.0f м/с (dv1 %.0f + dv2 %.0f), цель - гало Az = %.0f km, без затмений:"
           % (nom["dv1"] + nom["dv2"], nom["dv1"], nom["dv2"], Z_TGT * L.KMD))
     print("  dv1 не меняют ни SRP, ни Луна, ни наклон плоскости выведения; эксцентриситет")
-    print("  Земли даёт к нему %+3.0f м/с (максимум по фазе старта)." % (max(e_dv1) - nom["dv1"]))
+    print("  Земли в dv1 не оценивается: фазовый разброс %.0f м/с - артефакт кадра"
+          % (np.nanmax(e_dv1) - np.nanmin(e_dv1)))
+    print("  (п. 2); в бюджет миссии не входит.")
     print("  Наклон плоскости %.1f deg (Восточный, оптимум) стоит после переприцеливания"
           % I0)
     print("  %+.1f м/с; не поворачивать плоскость к эклиптике - %+.1f м/с (75 deg)."
