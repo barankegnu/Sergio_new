@@ -4,6 +4,7 @@ const fs = require("fs");
 const {
   Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell,
   WidthType, AlignmentType, HeadingLevel, ShadingType, LevelFormat, ImageRun,
+  Footer, PageNumber,
 } = require("docx");
 
 const RES = fs.readFileSync("result.txt", "utf8");
@@ -143,6 +144,7 @@ const W = 11906 - CW[1] - CW[2];                                 // ширина
 const P = (text, o = {}) => new Paragraph({
   alignment: o.align || AlignmentType.JUSTIFIED,
   spacing: { ...SP, before: o.before || 0, after: o.after || 60 },
+  keepLines: true, widowControl: true,
   indent: o.indent === false ? undefined : (o.noIndent ? undefined : { firstLine: 709 }),
   children: (Array.isArray(text) ? text : [{ t: text }]).map(r =>
     new TextRun({ ...BODY, text: fix(r.t), bold: r.b, italics: r.i })),
@@ -154,6 +156,7 @@ const H = (lvl, text) => new Paragraph({
 });
 const LI = text => new Paragraph({
   numbering: { reference: "b", level: 0 }, spacing: SP, alignment: AlignmentType.JUSTIFIED,
+  keepLines: true, widowControl: true,
   children: [new TextRun({ ...BODY, text: fix(text) })],
 });
 const cap = text => new Paragraph({
@@ -208,6 +211,19 @@ k.push(P([{ t: "Модель: " },
   { t: "CR3BP, два импульса (разгонный + тормозной) на разгонном блоке; удержание орбиты — СПД-100ВМ. ", b: true },
   { t: "Расчёт: " }, { t: "l2_transfer.py, l2_perturb.py (Python 3, numpy/scipy). 27 октября 2026 г.", b: true }],
   { align: AlignmentType.CENTER, indent: false }));
+
+k.push(H(1, "Ключевые числа"));
+k.push(TABLE(["Величина", "Значение", "Величина", "Значение"], [
+  ["dv\u2081 (разгонный с НОО)", dv1 + " м/с", "Время перелёта", tof + " сут"],
+  ["dv\u2082 (" + brake + ")", dv2 + " м/с", "Промах прицела", gap + " км (порог " + gapOk[2] + " км)"],
+  ["Суммарно dv", dvtot + " м/с", "Целевая орбита", "гало, Az = " + fmt(target[1]) + " км"],
+  ["Удержание", skDv[1] + " м/с/год (\u00b1100 км)", "Ограничение задания",
+   "\u2264 100 м/с/год, запас \u00d7" + skDv[2]],
+  ["Топливо РБ / ввод на НОО", fmt(RBnom[3]) + " / " + fmt(RBnom[4]) + " кг",
+   "Бюджет миссии", budget[0] + "\u2026" + budget[1] + " км/с"],
+], [2250, 2400, 2250, 2455], true));
+k.push(P("Подробности: перелёт и массы - п. 4 и 7, возмущения, тень и лимит удержания - п. 5"
+  + " и 6, ограничения расчёта и то, что в нём не моделировалось, - п. 9."));
 
 k.push(H(1, "1. Постановка задачи"));
 k.push(P("По заданию требуется рассчитать затраты характеристической скорости на перелёт с низкой околоземной орбиты на орбиту в окрестности точки L2 системы Солнце—Земля. Решение — в первом приближении, на основе решения задачи трёх тел; перелёт выполняется двумя импульсами: разгонным и тормозным; тип орбиты в окрестности точки Лагранжа выбирается самостоятельно. Перелёт делает разгонный блок, поддержание орбиты — космический аппарат двигателем СПД-100ВМ, и затраты на него не должны превышать 100 м/с в год (по возможности минимальные). Влияние формы лунной орбиты и её прецессии по заданию не учитывается."));
@@ -278,14 +294,14 @@ const FIG = (file, cap1, cap2, width) => {          // размеры PNG бер
     children: [new ImageRun({ type: "png", data: b,
                                transformation: { width: width, height: Math.round(width * h / w) } })] }));
 };
-FIG("fig1_plan.png", "Рисунок 1 - трасса перелёта и целевое гало: вид сверху на эклиптике", null, 600);
-FIG("fig1_xz.png", "Рисунок 2 - разрез xz: наклон плоскости выведения " + iECL + "\u00b0 к эклиптике,",
-    "конус полутени Земли и порог выхода из тени Az_min", 600);
-FIG("fig1_3d.png", "Рисунок 3 - та же трасса и целевая орбита в пространстве", null, 560);
-FIG("fig2_xi_v.png", "Рисунок 4 - ход перелёта: \u03be(t) и |v|(t) против скорости целевой орбиты",
-    "в точке касания (штрих-пунктир); вход по энергии " + brake, 470);
-FIG("fig2_shadow.png", "Рисунок 5 - затенение на перелёте: \u03c1(t) и радиус полутени r_pen(\u03be)",
-    "(логарифмическая шкала; точка включения 1-го импульса - в тени Земли)", 600);
+FIG("fig1_overview.png", "Рисунок 1 - весь перелёт: вид сверху на эклиптику. Трасса 38 %",
+    "времени проводит со стороны Солнца - отсюда большой разброс масштабов", 600);
+FIG("fig2_zoom.png", "Рисунок 2 - два прицельных зума: а) первые 150 тыс. км пути от Земли",
+    "(НОО и ночная сторона старта); б) подлёт к гало и точка входа", 680);
+FIG("fig3_shadow.png", "Рисунок 3 - тень: а) разрез xz, конус полутени и порог Az_min;",
+    "б) \u03c1(t) против границы полутени (лог-шкала)", 680);
+FIG("fig4_profile.png", "Рисунок 4 - ход перелёта: \u03be(t) и |v|(t) против скорости целевой",
+    "орбиты в точке касания (штрих-пунктир); вход " + brake, 500);
 
 k.push(H(1, "5. Плоскость выведения: что стоит трасса не в эклиптике"));
 k.push(P("Первый импульс задаёт не только энергию, но и плоскость: трасса лежит в плоскости НОО, повёрнутой к эклиптике на " + iECL + "° (минимум при i = " + iLEO + "°). Ниже — одна и та же трасса и та же цель (гало эклиптической семьи) при разном наклоне плоскости; dv2 дана при штатном прицеле и после локального переприцеливания по (θ, dC)."));
@@ -364,7 +380,7 @@ k.push(H(1, "10. Состав расчётных файлов"));
 k.push(TABLE(["Файл", "Содержание"], [
   ["l2_transfer.py", "модель CR3BP: L2, линеаризация, семейство гало с расчётом тени, прицеливание, массы РБ и СПД; вывод → result.txt (~15 мин); --check — проверка ядра модели (~2 с)"],
   ["l2_perturb.py", "та же трасса в расширенной модели: наклон плоскости выведения, SRP и тень, Луна (по заданию — круговая в эклиптике) с измерением исключённых членов, эллиптическая орбита Земли, J2 и площадка, удержание и ресурс СПД-100ВМ; вывод → perturb.txt (~13 мин)"],
-  ["plot_traj.py", "трасса и целевая орбита: то же интегрирование модели, числа из result.txt (блок AIM); вывод — пять рисунков: fig1_plan / fig1_xz / fig1_3d (рис. 1-3, геометрия) и fig2_xi_v / fig2_shadow (рис. 4-5, данные по трассе)"],
+  ["plot_traj.py", "рисунки 1-4: та же модель и те же числа (блок AIM в result.txt) - overview (весь перелёт сверху), zoom (первые 150 тыс. км от Земли и подлёт к гало с точкой входа), shadow (конус полутени, порог Az_min, rho(t)), profile (ход xi(t) и |v|(t))"],
   ["result.txt, perturb.txt", "протоколы расчётов - источники всех чисел отчёта (make_docx.js их парсит, документ не может разойтись с расчётом)"],
 ], [2200, 7155], true));
 k.push(P([{ t: "Источники: ", b: true },
@@ -388,6 +404,13 @@ const doc = new Document({
     style: { paragraph: { indent: { left: 720, hanging: 360 } } } }] }] },
   sections: [{
     properties: { page: { margin: { top: 1134, bottom: 1134, left: CW[1], right: CW[2] } } },
+    footers: {                                   // номер страницы внизу каждой полосы
+      default: new Footer({ children: [new Paragraph({ alignment: AlignmentType.CENTER,
+        children: [new TextRun({ font: BODY.font, size: 20, text: "Расчёт перелёта НОО \u2192 L2 \u00b7 стр. " }),
+          new TextRun({ font: BODY.font, size: 20, children: [PageNumber.CURRENT] }),
+          new TextRun({ font: BODY.font, size: 20, text: " из " }),
+          new TextRun({ font: BODY.font, size: 20, children: [PageNumber.TOTAL_PAGES] })] })] }),
+    },
     children: k,
   }],
 });
