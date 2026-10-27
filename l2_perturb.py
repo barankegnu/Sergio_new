@@ -20,7 +20,7 @@ dv2 для входа на неё; затем то же с переприцел�
 наклонением, методика Боровина и др.) - здесь измерена цена цели из эклиптической семьи,
 т.е. верхняя оценка.
 
-Запуск:  python3 l2_perturb.py        (~10 мин, нужен result.txt)
+Запуск:  python3 -u l2_perturb.py > perturb.txt   (~12 мин, нужен result.txt)
 """
 import re
 import numpy as np
@@ -30,12 +30,17 @@ import l2_transfer as L
 
 
 def nominal(path="result.txt"):
-    """Az цели, угол старта и dC - из протокола основного расчёта."""
+    """Цель, угол старта и dC берутся из блока AIM машинной точности, который печатает
+    l2_transfer. Округление theta до 0.1 deg (как в строке печати "343.5 deg") сдвигает
+    точку входа почти на 1000 km: усиление по неустойчивому направлению за трассу
+    e^(140/23.4) ~ 400 раз, и perturb начал бы жить своей жизнью (рассогласование
+    нашло именно ревьюером: 477 km в result.txt против 1162 km здесь)."""
     t = open(path, encoding="utf8").read()
-    az = float(re.search(r"целевая орбита: Az = ([\d.]+) km", t).group(1))
-    th = float(re.search(r"угол старта в плоскости НОО\s*=\s*([-\d.]+) deg", t).group(1))
-    dc = float(re.search(r"dC = ([-\d.eE+]+)", t).group(1))
-    return az / L.KMD, np.deg2rad(th), dc
+    m = re.search(r"AIM z = ([-\d.e+]+) theta = ([-\d.]+) dC = ([-\d.e+]+)", t)
+    if m is None:
+        raise RuntimeError("в result.txt нет блока AIM - перегоните l2_transfer.py")
+    z, th, dc = (float(x) for x in m.groups())
+    return z, th, dc
 
 
 Z_TGT, TH, DC = nominal()
@@ -148,11 +153,11 @@ def one_leg(orb, theta, dC, ts_n=2500, comove=False, ms=None, must_brake=True):
     return out
 
 
-def reaim(orb, comove=False, ms=None):
+def reaim(orb, comove=False, ms=None, seed=None):
     """local (launch angle, energy) re-aim = what a design in the fuller model would do.
     The active force model is whatever L.SRP / L.MOON / L.SUN_E are set to."""
     opt = minimize(lambda q: one_leg(orb, q[0], q[1], comove=comove, ms=ms)["tot"],
-                   [TH, DC], method="Nelder-Mead",
+                   list(seed) if seed is not None else [TH, DC], method="Nelder-Mead",
                    options=dict(xatol=1e-6, fatol=1e-3, maxiter=25))
     return one_leg(orb, opt.x[0], opt.x[1], comove=comove, ms=ms)
 
@@ -164,6 +169,14 @@ def main():
     print("=" * 78)
     print("Референс CR3BP: dv1 = %.1f, dv2 = %.1f, dv = %.1f m/s, промах %.0f km, %.1f сут"
           % (nom["dv1"], nom["dv2"], nom["dv1"] + nom["dv2"], nom["gap"], nom["tof"]))
+    xi0 = L.R_P * np.cos(TH) * L.KMD
+    rho0 = L.R_P * abs(np.sin(TH)) * L.KMD
+    r_umb0 = L.RE / L.KM - (696000.0 - L.RE / L.KM) / (L.AU / L.KM) * xi0
+    print("   точка включения 1-го импульса: на %.0f km за Землёй, в %.0f km от оси"
+          % (xi0, rho0))
+    print("   С-З; полная тень там %.0f km -> %s. Это геометрия старта,"
+          % (r_umb0, "КА в тени" if rho0 < r_umb0 else "тени нет"))
+    print("   а не целевая орбита (для нее считано 0 % в тени).")
     print("целевая орбита: Az = %.0f km (из result.txt), период %.1f сут, затмений %s"
           % (Z_TGT * L.KMD, orb["T"] * L.DAY,
              "нет" if orb["sh_pen"] == 0 else "есть"))
@@ -171,8 +184,9 @@ def main():
     print("-" * 78)
     print("1) ПЛОСКОСТЬ ВЫВЕДЕНИЯ: трасса не в эклиптике, цель - гало эклиптической семьи")
     print("   (Восточный, i_LEO = %.1f deg, наклон эклиптики %.2f deg)" % (L.I_LEO, L.EPS_ECL))
-    print("   наклон    dv1 прицел  dv2 прицел  промах   dv2 переприц  тоф    доля dv2")
-    print("   к эклип.    m/s         m/s        km         m/s        сут   вне эклиптики, %")
+    print("   наклон    dv1 прицел  dv2 прицел  промах   dv2 переприц  промах    тоф")
+    print("   к эклип.    m/s         m/s        km         m/s      переприц, км  сут")
+    print("                                                              доля dv2 вне эклиптики, %")
     I0 = np.degrees(L.I_ECL)
     rows = []
     for deg, why in ((0.0, "идеал - только с площадки |широта| <= 23.4 deg"),
@@ -182,9 +196,13 @@ def main():
         plane(deg)
         f, r = one_leg(orb, TH, DC, ms=0.5), reaim(orb, ms=0.5)
         rows.append((deg, f, r))
-        print("  %5.1f deg %9.1f %10.1f %9.0f %12.1f %9.1f      %4.1f / %4.1f   (%s)"
-              % (deg, f["dv1"], f["dv2"], f["gap"], r["dv2"], r["tof"], zsh(f), zsh(r), why))
+        print("  %5.1f deg %9.1f %10.1f %9.0f %12.1f %11.0f %7.1f      %4.1f / %4.1f  (%s)"
+              % (deg, f["dv1"], f["dv2"], f["gap"], r["dv2"], r["gap"], r["tof"],
+                 zsh(f), zsh(r), why))
     plane(I0)
+    print("   Меньшее dv2 переприцеленного хода достигается в ДРУГОЙ точке касания (см.")
+    print("   столбец его промаха), а не лучшей посадкой: отбор цели с ограничением")
+    print("   промах <= %.0f km делает l2_transfer, здесь цель одна - проектная." % L.GAP_OK_KM)
     dv2_t = [f["dv2"] for _, f, _ in rows]
     zq_t = [zsh(f) for _, f, _ in rows]
     d_tot = [r["dv1"] + r["dv2"] for _, _, r in rows]
@@ -232,8 +250,6 @@ def main():
         L.SUN_E = dict(e=0.016710, M0=M0)
         a = one_leg(orb, TH, DC)
         b = one_leg(orb, TH, DC, comove=True)
-        if name == "перигей":
-            one_e = a
         e_dv1.append(a["dv1"])
         L.SUN_E = None
         print("   %-10s  %.5f  %7.1f    %9.1f       %8.1f       %8.0f"
@@ -264,7 +280,7 @@ def main():
 
     print("-" * 78)
     print("3) ДАВЛЕНИЕ СОЛНЦА (dv2 при неизменном прицеле; dv1 не меняется)")
-    print("   A, m2   C_R   a_SRP, м/с^2  в тени, с   dv2 без тени и"
+    print("   A, m2   C_R   a_SRP, м/с^2  в тени за 1.75 сут, с   dv2 без тени и"
           " с ней, разность   dv2, m/s")
     srps = []
     for A in (20.0, 100.0):
@@ -350,7 +366,7 @@ def main():
               % (ph, np.degrees(dth), r["dv2"], r["gap"], r["dv1"] + r["dv2"],
                  r["dv1"] + r["dv2"] - nom["dv1"] - nom["dv2"], nom["dv1"] + nom["dv2"]))
         L.MOON = moon(ph)
-        r2 = reaim(orb)
+        r2 = reaim(orb, seed=(TH + dth, DC))   # переприцеливаем ЛУЧШИЙ ход, а не номинал
         print("   локальное переприцеливание: dv = %.1f м/с (%+.1f)"
               % (r2["dv1"] + r2["dv2"], r2["dv1"] + r2["dv2"] - nom["dv1"] - nom["dv2"]))
     L.MOON = None

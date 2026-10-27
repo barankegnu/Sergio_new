@@ -91,3 +91,67 @@ fig.tight_layout(pad=0.4)
 fig.savefig("traj.png")
 print("traj.png: %d точек трассы, %d точек гало (Az = %.0f km), тоф %.1f сут, dv1 = %.1f м/с"
       % (tr.shape[1], H.shape[1], Z_TGT * L.KMD, TOF * L.DAY, (u - L.V_LEO) * L.V_U * 1000))
+
+# ---------------- рисунок 2: данные по трассе (временны́е ряды и проектные числа) ----
+t_d = np.linspace(0.0, TOF, tr.shape[1]) * L.DAY                     # сут
+v_rot = np.linalg.norm(tr[3:6], axis=0) * L.V_U                      # км/с в ротирующемся
+xi = (tr[0] - (1 - L.MU)) * L.KMD                                     # км за Землёй (+k L2)
+rho = np.hypot(tr[1], tr[2]) * L.KMD                                  # км до оси Солнце-Земля
+r_pen_t = L.RE / L.KM + (696000.0 + L.RE / L.KM) / (L.AU / L.KM) * np.maximum(xi, 0.0)
+in_pen = (xi > 0.0) & (rho < r_pen_t)
+v_halo = np.linalg.norm(orb["V"], axis=1) * L.V_U
+# сравнение dv2 надо вести с ТОЧКОЙ орбиты, где происходит касание, а не с последним
+# выборкой периодической орбиты:
+j_in = int(np.argmin(((orb["P"] - tr[0:3, -1])**2).sum(1)))
+v_orb_in = np.linalg.norm(orb["V"][j_in]) * L.V_U
+# знак второго импульса берём из протокола (там он считается на сетке прицеливания):
+# запас всего ~мм/с, и пересчёт по своей сетке его меняет - это граница ограничения dC=0
+dv_brake = num(r"превышение скорости трассы над орбитой = ([-\d.]+) мм/с")
+BRK = "тормозной" if dv_brake >= 0 else "разгонный"
+
+f2, ax2 = plt.subplots(2, 2, figsize=(7.2, 4.8), dpi=200)
+a = ax2[0, 0]
+a.plot(t_d, xi / 1e3, lw=1.4, color="tab:blue")
+a.axhline(L.RHO * L.KMD / 1e3, ls=":", lw=.9, color="tab:red")
+a.set_title("(a) расстояние за Землёй ξ(t)", fontsize=8)
+a.set_xlabel("время, сут"); a.set_ylabel("ξ, тыс. км"); a.grid(alpha=.3)
+a.annotate("L2", (0.97, L.RHO * L.KMD / 1e3), fontsize=6.5, color="tab:red", ha="right")
+
+a = ax2[0, 1]
+a.plot(t_d, v_rot, lw=1.4, color="tab:blue", label="скорость трассы (ротирующийся кадр)")
+a.plot(np.linspace(0.0, orb["T"] * L.DAY, len(v_halo)), v_halo, lw=1.1, color="tab:green",
+       label="скорость на целевой орбите")
+a.axhline(v_orb_in, ls="-.", lw=.9, color="tab:green")
+a.axvline(t_d[-1], ls="--", lw=.9, color="k")
+a.set_title("(b) |v|: вход %s, превышение трассы над орбитой %.1f мм/с"
+            % (BRK, dv_brake), fontsize=8)
+a.set_xlabel("время, сут"); a.set_ylabel("|v|, км/с"); a.grid(alpha=.3)
+a.legend(fontsize=5.8, loc="lower left")
+
+a = ax2[1, 0]
+a.plot(t_d, rho / 1e3, lw=1.4, color="tab:blue", label="ρ до оси Солнце—Земля")
+a.plot(t_d, r_pen_t / 1e3, lw=1.1, color="0.35", ls=":", label="радиус полутени Земли")
+a.fill_between(t_d, 0, np.where(in_pen, r_pen_t / 1e3, 0), color="0.8", lw=0)
+a.set_title("(c) затмения на перелёте (серое — в полутени)", fontsize=8)
+a.set_xlabel("время, сут"); a.set_ylabel("ρ, тыс. км"); a.grid(alpha=.3)
+a.legend(fontsize=5.8)
+
+a = ax2[1, 1]; a.axis("off")
+lines = ["dv1 = %8.1f м/с   (разгонный с НОО, 200 км)" % ((u - L.V_LEO) * L.V_U * 1000),
+         "dv2 = %8.1f м/с   (%s)" % (num(r"dv2 \(второй импульс\)\s*=\s*([\d.]+)"),
+                                     BRK),
+         "тоф = %8.1f сут  промах прицела %6.0f км"
+         % (TOF * L.DAY, num(r"промах по месту прицеливания\s*=\s*(\d+) km")),
+         "цель: гало Az = %6.0f км, Ax = %6.0f км" % (Z_TGT * L.KMD, orb["Ax"] * L.KMD),
+         "      период %5.1f сут, C = %.7f" % (orb["T"] * L.DAY, orb["C"]),
+         "в тени на перелёте: %.2f %% времени (%.0f из %d выборок)"
+         % (100.0 * in_pen.mean(), in_pen.sum(), len(in_pen)),
+         "ввести на НОО: %s кг (РБ + КА)" % f"{int(num(r'ввести на НОО (\d+) kg')):d}"]
+a.text(0.0, 0.95, "\n".join(lines), fontsize=7.2, family="monospace", va="top")
+a.set_title("(d) проектные числа (result.txt)", fontsize=8)
+
+f2.tight_layout(pad=0.5)
+f2.savefig("traj_data.png")
+print("traj_data.png: тень на перелёте %.2f%% времени (%d выборок), |v| входа %.4f против"
+      " %.4f км/с; вход %s (по протоколу %+0.1f мм/с)"
+      % (100.0 * in_pen.mean(), in_pen.sum(), v_rot[-1], v_orb_in, BRK, dv_brake))

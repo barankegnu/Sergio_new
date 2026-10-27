@@ -23,8 +23,8 @@
 трассы - правило Боровина, Ильина и др.: "из рассчитанного множества выбираются те
 траектории перелёта, наклонение которых соответствует наклонению орбиты выведения".
 
-Запуск:  python3 l2_transfer.py            (numpy + scipy, ~5 мин)
-         python3 l2_transfer.py --check    (проверка ядра модели, ~35 с)
+Запуск:  python3 -u l2_transfer.py > result.txt   (numpy + scipy, ~15 мин)
+         python3 -u l2_transfer.py --check   (проверка ядра модели, ~2 с)
 """
 import numpy as np
 from scipy.integrate import solve_ivp
@@ -329,11 +329,18 @@ def leg(orb, theta, dC=0.0, tof_max=3.5, n1=200, n2=400, max_step=0.5, must_brak
 
 
 def refine(c, tol=1e-3, must_brake=True, maxiter=120):
-    """2-parameter local refinement (launch angle + energy offset) of one coarse seed."""
-    r0 = minimize(lambda q: leg(c["orb"], q[0], q[1], must_brake=must_brake)["tot"],
-                  [c["theta"], c["dC"]], method="Nelder-Mead",
+    """2-parameter local refinement (launch angle + energy offset) of one coarse seed.
+    dC при требовании тормозного входа параметризуется квадратом: на границе dC = 0
+    начальный симплекс Нельдера-Мида вырождается (все вершины с dC < 0 дают ту же точку)
+    и поиск встаёт на месте - именно так l2_transfer терял решение с dv2 = 58,9 м/с,
+    которое на той же цели находит reaim в l2_perturb.py."""
+    sq = must_brake
+    par = (lambda q: q * q) if sq else (lambda q: q)
+    x0 = [c["theta"], np.sqrt(max(c["dC"], 1e-8)) if sq else c["dC"]]
+    r0 = minimize(lambda x: leg(c["orb"], x[0], par(x[1]), must_brake=must_brake)["tot"],
+                  x0, method="Nelder-Mead",
                   options=dict(xatol=1e-5, fatol=tol, maxiter=maxiter))
-    return leg(c["orb"], r0.x[0], r0.x[1], must_brake=must_brake)
+    return leg(c["orb"], r0.x[0], par(r0.x[1]), must_brake=must_brake)
 
 
 def aim_transfer(fam, n_theta=16, tol=1e-3, pool=None, brake_only=True):
@@ -352,20 +359,31 @@ def aim_transfer(fam, n_theta=16, tol=1e-3, pool=None, brake_only=True):
                     orb["best"] = r
     tried = []
     for orb in sorted(pool or fam, key=lambda oo: oo["best"]["dv1"] + oo["best"]["dv2"]):
-        tried.append(refine(orb["best"], tol, maxiter=30))      # быстрый скрининг цели
+        t = refine(orb["best"], tol, maxiter=30); t["kind"] = "скрининг"
+        tried.append(t)                            # быстрый скрининг цели
     br = [t for t in tried if t["braking"]]
     if not br:                    # тормозного входа в этой части семьи просто нет
-        return min(tried, key=lambda x: x["tot"]), None, tried, False, 0
+        return min(tried, key=lambda x: x["tot"]), None, tried, False
     brs = sorted(br, key=lambda x: x["dv1"] + x["dv2"])
     lead = [t for t in brs[:3] if t["dv1"] + t["dv2"] - brs[0]["dv1"] - brs[0]["dv2"]
             < 30.0 / (V_U * 1000)]        # лидеры: в пределах 30 м/с от минимума
-    tried += [refine(t["orb"]["best"], tol) for t in lead]      # полное уточнение
-    fin = tried[-len(lead):]
-    ok = [t for t in fin if t["gap"] <= GAP_OK_KM and t["braking"]]
+    for t in lead:                                            # полное уточнение лидеров
+        t2_ = refine(t["orb"]["best"], tol); t2_["kind"] = "полное"; tried.append(t2_)
+    ok = [t for t in tried if t["kind"] == "полное"
+          and t["gap"] <= GAP_OK_KM and t["braking"]]
     if ok:
         best = min(ok, key=lambda t: t["dv1"] + t["dv2"])
-        return best, best, tried, True, len(lead)
-    return min(fin, key=lambda x: x["tot"]), None, tried, False, len(lead)
+        # второй проход от найденной точки: множество касаний гало негладкое, и один
+        # проход Nelder-Mead оставляет на месте лучшую точку (так нашёл re-aim в
+        # l2_perturb.py: dv2 58,9 против 130,0 после первого прохода)
+        again = refine(best, tol); again["kind"] = "повтор"
+        tried.append(again)
+        if again["braking"] and again["gap"] <= GAP_OK_KM and \
+                again["dv1"] + again["dv2"] < best["dv1"] + best["dv2"]:
+            best = again
+        return best, best, tried, True
+    return min((t for t in tried if t["kind"] != "скрининг"), key=lambda x: x["tot"]), \
+           None, tried, False
 
 
 # -------------------------------------------------------------------- report
@@ -387,10 +405,10 @@ def self_check():
     assert max(abs(jacobi(tr[:, k]) - C0) for k in range(tr.shape[1])) < 1e-9
     u = u_for_jacobi(0.0, C0)
     assert abs((u - V_LEO) * V_U - 3.19) < 0.05, u           # dv1 ~ 3.2 km/s
-    s_b = dep_state(0.0, u)
-    assert abs(jacobi(s_b) - C0) < 1e-12, jacobi(s_b) - C0   # импульс назначен точно
-    r_ = s_b[0:3]                                           # член omega x r на месте:
-    assert abs(s_b[3] - r_[1]) < 1e-9, s_b[3]                # u = 0 -> v_rot = ve - omega x r
+    assert abs(jacobi(dep_state(0.0, u)) - C0) < 1e-12       # импульс назначен точно
+    s_b = dep_state(np.pi / 2, 0.0)                   # тест члена omega x r: при u=0 и
+    assert abs(s_b[3] - s_b[1]) < 1e-15, s_b[3:6]    # theta=pi/2 v_x = +y != 0 (без члена
+    assert abs(s_b[4]) < 1e-15, s_b[4:6]              # было бы 0); v_y = 1-mu-x = 0
     # тень: сама орбита внутри конуса полутени даёт затмение, снаружи - нет
     assert halo_family([0.5 * R_PEN_L2 / KMD], n=120)[0]["sh_pen"] > 0
     assert halo_family([2.0 * R_PEN_L2 / KMD], n=120)[0]["sh_pen"] == 0
@@ -463,13 +481,13 @@ def main():
     print("   стартом для уточнения, критерием он не является.")
     pool = free or fam          # если затмений не избежать - выбирать по одному dv
 
-    r, coarse, tried, landed, n_fin = aim_transfer(fam, pool=pool)
+    r, coarse, tried, landed = aim_transfer(fam, pool=pool)
     o = r["orb"]
     print("-" * 78)
     print("Уточнение кандидатов (скрининг всех беззатменных, затем полное уточнение лидеров):")
     print("  целевая Az, km   dv1+dv2, m/s   промах, km   тоф, сут   тормозн.?  статус")
-    for n_t, t in enumerate(tried):
-        st = "ВЫБРАНА" if t is r else ("полное" if n_t >= len(tried) - n_fin else "скрининг")
+    for t in tried:
+        st = "ВЫБРАНА" if t is r else t["kind"]
         print("  %12.0f %12.1f %11.0f %9.1f      %-6s     %s"
               % (t["orb"]["z"] * KMD, (t["dv1"] + t["dv2"]) * V_U * 1000, t["gap"], t["tof"],
                  "да" if t["braking"] else "нет", st))
@@ -505,14 +523,15 @@ def main():
           % (dist_earth(r["arr"]) * KMD))
     print("  промах по месту прицеливания        = %6.0f km (после уточнения)" % r["gap"])
     print("  избыток энергии перелёта над C(орбиты): dC = %.2e" % r["dC"])
-    print("  dv2 (тормозной)                   = %8.1f m/s" % (r["dv2"] * V_U * 1000))
+    print("  dv2 (второй импульс)                = %8.1f m/s" % (r["dv2"] * V_U * 1000))
     j_in = int(np.argmin(((o["P"] - r["arr"])**2).sum(1)))
     v_arr, v_orb = np.linalg.norm(r["arrv"]), np.linalg.norm(o["V"][j_in])
     res = r["arrv"] - o["V"][j_in]
     print("  |v| трассы в точке входа = %.4f km/s, |v| орбиты = %.4f km/s -> по модулям %s;"
-          " по невязке векторов dv2 = %.1f m/s"
           % (v_arr * V_U, v_orb * V_U,
-             "тормозной" if v_arr > v_orb else "разгонный", r["dv2"] * V_U * 1000))
+             "тормозной" if v_arr >= v_orb else "разгонный"))
+    print("  превышение скорости трассы над орбитой = %.1f мм/с (dC = %.3e)"
+          % ((v_arr - v_orb) * V_U * 1e6, r["dC"]))
     print("  доля невязки вне эклиптики в dv2 = %.1f%% (dv2 - невязка ВЕКТОРОВ скоростей)"
           % (100 * abs(res[2]) / np.linalg.norm(res)))
     unc = refine(o["best"], must_brake=False)          # что стоит требование "тормозной"
@@ -530,6 +549,8 @@ def main():
         print("  лучшая из найденных трасс, но схему задания она НЕ удовлетворяет целиком.")
     print("  СУММАРНАЯ характеристическая скорость dv = %.1f m/s"
           % ((r["dv1"] + r["dv2"]) * V_U * 1000))
+    print("  AIM z = %.12e theta = %.12f dC = %.16e tof_TU = %.12f C = %.16f"
+          % (o["z"], r["theta"], r["dC"], r["tof"] / DAY, o["C"]))
     print("  критерий выбора цели: минимум уточнённого dv среди гало БЕЗ ЗАТМЕНИЙ, чья")
     print("  трасса попадает на орбиту (промах %.0f km <= %.0f km) И прибывает быстрее"
           " орбиты (второй импульс - тормозной, dC >= 0): выполнено %s."
@@ -552,8 +573,9 @@ def main():
                  M_DRY * sk_dv / 1e6))
     m_x = M_DRY * (1 - np.exp(-(SKT["LIFE_Y"] * 10.0) / (SKT["ISP"] * G0)))
     m_sc = M_DRY + m_x                              # масса КА на момент включения dv1
-    print("  принята заправка ксенонном %.1f kg (удержание ~10 m/s за миссию, см."
-          " perturb.txt) -> масса КА %6.0f kg" % (m_x, m_sc))
+    print("  принята заправка ксенонном %.1f kg (удержание %.0f m/s за миссию %g лет, см."
+          % (m_x, SKT["LIFE_Y"] * 10.0, SKT["LIFE_Y"]))
+    print("  perturb.txt) -> масса КА %6.0f kg" % m_sc)
     mp_nom = (m_sc + RB["M_DRY"]) * (np.exp(dv_rb / (RB["ISP"] * G0)) - 1)
     print("  РБ: m_топл = (m_КА + m_сух_РБ)*(exp(dv/(Isp*g0)) - 1), m_сух_РБ = %.0f kg"
           " (АССУМPTION, ТТД КВТК не подтверждены):" % RB["M_DRY"])
