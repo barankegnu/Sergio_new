@@ -4,16 +4,24 @@
 Перелёт НОО -> орбита в окрестности точки L2 системы Солнце-Земля, два импульса.
 Первое приближение: круговая ограниченная задача трёх тел (CR3BP).
 
-Дано (Zadanie_neyronke.docx): масса КА 2500 kg, наклонение НОО 23.5 deg,
-высота НОО 200 km, схема из двух импульсов (разгонный + тормозной).
+Дано (Zadanie_neyronke.docx): сухая масса КА 1800 kg; космодром - Восточный;
+разгонный блок КВТК выполняет оба импульса перелёта; высота НОО 200 km;
+поддержание орбиты - СПД-100ВМ, не более 100 m/s в год; форма и прецессия лунной
+орбиты не учитываются (для Луны оставлены круговая орбита в эклиптике).
 Тип орбиты у L2 выбирается расчётом: семейство пространственных гало-орбит,
-критерий выбора - минимум суммарной характеристической скорости.
+критерий - минимум суммарной характеристической скорости среди орбит, выходящих
+из конуса тени Земли (иначе раз в 180 сут - затмение: сброс давления Солнца и
+питания прямо бьют по бюджету удержания, а оно по заданию должно быть минимальным).
 
-Геометрия наклонения. Плоскость НОО наклонена к эклиптике на i = 23.5 deg; долгота
-восходящего узла считаем выбранной так, чтобы вектор разгона лежал в плоскости НОО
-(это всегда можно сделать моментом старта). Тогда первый импульс коллинеярен скорости
-НОО - разворота плоскости нет, и i в бюджет dv не входит. Место включения импульса
-смещено из эклиптики на R_p*sin(i) = 2620 km (0.2% масштаба перелёта) - этим пренебрегаем.
+Геометрия наклонения. Величина первого импульса задаётся интегралом Якоби, т.е. от
+наклонения НЕ зависит; наклонение задаёт ПЛОСКОСТЬ трассы. Плоскость НОО содержит
+направление Земля->L2 (этого всегда можно достичь азимутом и моментом старта) и
+наклонена к эклиптике на I_ECL = |i_LEO - eps_эклиптики| = 28.2 deg - меньшего угла
+при i_LEO = 51.6 deg не даёт ни одна площадка. Трасса интегрируется в этой наклонённой
+плоскости (3D), цель - гало эклиптической семьи; цену рассогласования плоскостей
+измеряет l2_perturb.py, а снимается она выбором гало с наклонением, равным наклонению
+трассы - правило Боровина, Ильина и др.: "из рассчитанного множества выбираются те
+траектории перелёта, наклонение которых соответствует наклонению орбиты выведения".
 
 Запуск:  python3 l2_transfer.py            (numpy + scipy, ~5 мин)
          python3 l2_transfer.py --check    (проверка ядра модели, ~35 с)
@@ -32,7 +40,20 @@ N_ORB = np.sqrt((GM_S + GM_E) / AU**3)                  # Earth mean motion, 1/s
 T_U, V_U = 1.0 / N_ORB, N_ORB * AU / KM                 # CR3BP time (s), vel (km/s)
 DAY, KMD = T_U / 86400.0, AU / KM                       # TU in days, AU in km
 
-H_PARK, I_PARK, M_SC = 200e3, np.deg2rad(23.5), 2500.0
+# --------------------------------------------------- исходные данные задания
+H_PARK, M_DRY = 200e3, 1800.0                    # высота НОО, м; сухая масса КА, кг
+SITE, I_LEO = "Восточный", 51.6               # наклонение НОО: как у прямых стартов
+#   с Восточного к МКС и у «Спектр-РГ» (Боровин и др.: i = 51,611 deg). Широту
+#   площадки не используем: важно только i_LEO >= широты, т.е. достижимо без
+#   разворота плоскости. Источник по наклонению - ../Sergio_doc, по широте - нет.
+EPS_ECL = 23.44                                  # наклон эклиптики к экватору
+I_ECL = np.deg2rad(abs(I_LEO - EPS_ECL))         # плоскость НОО <-> эклиптики, min
+RB = dict(name="КВТК", ISP=445.0, M_DRY=1300.0)  # РБ делает dv1+dv2; ИСП и "сухая"
+#   масса РБ - АССУМPTION: ТТД КВТК в ../Sergio_doc не найдены (grep по всем PDF - 0
+#   совпадений), заданы параметрически, чувствительность печатается в блоке МАССА.
+SKT = dict(name="СПД-100ВМ", ISP=1600.0, F=0.090, CAP_Y=100.0, LIFE_Y=5.0,
+           RES_MNs=4.5e6, RES_H=15000.0, RES_IGN=13000.0)   # 36-55.pdf, табл. 3
+G0 = 9.80665
 R_P = (RE + H_PARK) / AU                                # perigee radius, AU
 V_LEO = np.sqrt(GM_E / (RE + H_PARK)) / KM / V_U        # circular speed, synodic
 
@@ -148,6 +169,20 @@ def fly_traj(s0, tf, n=1200, rtol=1e-11):
                      dense_output=True).sol(np.linspace(0, tf, n))
 
 
+def shadow(P):
+    """Fraction of an orbit (points x,y,z in synodic units) inside the Earth's umbra /
+    penumbra cone, and the minimum distance to the Sun-Earth axis.  Axis = Sun->Earth = +x;
+    xi = km behind the Earth, rho = km off the axis."""
+    xi = (P[:, 0] - (1 - MU)) * KMD                       # km behind the Earth
+    rho = np.hypot(P[:, 1], P[:, 2]) * KMD                # km off the Sun-Earth axis
+    back = xi > 0
+    r_umb = RE / KM - (696000.0 - RE / KM) / (AU / KM) * xi      # umbra radius, km
+    r_pen = RE / KM + (696000.0 + RE / KM) / (AU / KM) * xi      # penumbra radius, km
+    umb = back & (rho < np.maximum(r_umb, 0.0))
+    pen = back & (rho < r_pen)
+    return umb.mean(), pen.mean(), float(np.min(np.where(back, rho, np.inf)))
+
+
 def dist_earth(p):
     """distance from the Earth's centre, p = (3,) or (3,N) in synodic units."""
     p = np.asarray(p, float)
@@ -173,6 +208,25 @@ _EIG = np.linalg.eig(np.vstack([np.hstack([np.zeros((3, 3)), np.eye(3)]), _J]))
 LAMBDA = np.max(np.real(_EIG[0]))                                   # unstable root
 _OSC = np.abs(np.real(_EIG[0])) < np.abs(np.imag(_EIG[0]))          # oscillatory pair
 W_VERT = abs(_EIG[0][_OSC][np.argmax(abs(_EIG[1][2, _OSC]))].imag)  # z-dominant mode
+
+# Radius of the Earth's penumbral cone at the distance of L2 (the umbra cone ends
+# earlier, at ~1.38e6 km, so there is no umbra at L2 at all).
+RS_KM, R_PEN_L2 = 696000.0, None
+R_PEN_L2 = RE / KM + (RS_KM + RE / KM) / (AU / KM) * RHO * KMD
+
+
+def halo_zmin(tol=2e-6):
+    """Минимальная амплитуда Az, при которой гало вовсе не заходит в полутени Земли.
+    Порог считается самой орбитой (rho_min зависит и от того, где орбита проходит
+    ближе к Земле), а не геометрической оценкой; бинарный поиск, ~9 решений гало."""
+    lo, hi = R_PEN_L2 / KMD / 4, 3e-4
+    for _ in range(40):
+        if hi - lo < tol:
+            break
+        mid = 0.5 * (lo + hi)
+        free = halo_family([mid], n=600)[0]["sh_pen"] == 0   # плотная выборка: окно тени ~11 deg
+        lo, hi = (lo, mid) if free else (mid, hi)
+    return hi
 
 # ------------------------------------------------------------ halo family
 def planar_lyapunov(dx):
@@ -206,13 +260,15 @@ def halo_family(z_list, n=240):
     for z in z_list:
         s, T = halo(z, [seed[0][0], seed[0][4], seed[1] / 2])
         tr = fly_traj(s, T, n, 1e-12)
+        sh_umb, sh_pen, rho_min = shadow(tr[0:3].T)
         fam.append(dict(z=z, s0=s, T=T, C=jacobi(s), P=tr[0:3].T, V=tr[3:6].T,
-                        Ax=np.max(np.abs(tr[0] - X_L2)), rmin=np.min(dist_earth(tr[0:3]))))
+                        Ax=np.max(np.abs(tr[0] - X_L2)), rmin=np.min(dist_earth(tr[0:3])),
+                        sh_umb=sh_umb, sh_pen=sh_pen, rho_min=rho_min))
         seed = (s, T)
     return fam
 
 # ---------------------------------------------------------------- transfer
-E_LEO = np.array([0.0, np.cos(I_PARK), np.sin(I_PARK)])   # unit perp. to Sun-Earth line
+E_LEO = np.array([0.0, np.cos(I_ECL), np.sin(I_ECL)])     # unit perp. to Sun-Earth line
 X_HAT = np.array([1.0, 0.0, 0.0])                         # Earth -> L2 direction
 
 
@@ -257,19 +313,23 @@ def leg(orb, theta, dC=0.0, tof_max=3.5, n1=200, n2=400, max_step=0.5):
                 tot=(u - V_LEO + dv2) * V_U * 1000 + gap * KMD / 50.0)
 
 
-def aim_transfer(fam, n_theta=16, tol=1e-3):
-    """coarse scan over the halo family and the launch epoch, then a 2-parameter
-    refinement (launch angle + energy offset) that closes the intercept gap."""
+def aim_transfer(fam, n_theta=16, tol=1e-3, pool=None):
+    """coarse scan over the halo family and the launch epoch (best coarse result is
+    stored on every orbit), then a 2-parameter refinement (launch angle + energy
+    offset) of the best orbit of `pool` = the design target."""
     coarse = None
     for orb in fam:
         for ith in range(n_theta):
             r = leg(orb, 2 * np.pi * ith / n_theta)
+            if orb.get("best") is None or r["tot"] < orb["best"]["tot"]:
+                orb["best"] = r
             if coarse is None or r["tot"] < coarse["tot"]:
                 coarse = r
-    r0 = minimize(lambda q: leg(coarse["orb"], q[0], q[1])["tot"],
-                  [coarse["theta"], coarse["dC"]], method="Nelder-Mead",
+    c = min(pool or fam, key=lambda o: o["best"]["tot"])["best"]
+    r0 = minimize(lambda q: leg(c["orb"], q[0], q[1])["tot"],
+                  [c["theta"], c["dC"]], method="Nelder-Mead",
                   options=dict(xatol=1e-5, fatol=tol, maxiter=120))
-    return leg(coarse["orb"], r0.x[0], r0.x[1]), coarse
+    return leg(c["orb"], r0.x[0], r0.x[1]), coarse
 
 
 # -------------------------------------------------------------------- report
@@ -291,6 +351,17 @@ def self_check():
     assert max(abs(jacobi(tr[:, k]) - C0) for k in range(tr.shape[1])) < 1e-9
     u = u_for_jacobi(0.0, C0)
     assert abs((u - V_LEO) * V_U - 3.19) < 0.05, u           # dv1 ~ 3.2 km/s
+    # тень: сама орбита внутри конуса полутени даёт затмение, снаружи - нет
+    assert halo_family([0.5 * R_PEN_L2 / KMD], n=120)[0]["sh_pen"] > 0
+    assert halo_family([2.0 * R_PEN_L2 / KMD], n=120)[0]["sh_pen"] == 0
+    # тень: сам L2 лежит ВНУТРИ конуса полутени, но уже за концом конуса полной тени
+    at_l2 = np.array([[X_L2, 0.0, 0.0]])
+    assert shadow(at_l2)[1] == 1.0 and shadow(at_l2)[0] == 0.0
+    assert shadow(at_l2)[2] == 0.0
+    off = np.array([[X_L2, 2e5 / KMD, 0.0]])                 # 200 000 km от оси S-Z
+    assert shadow(off)[1] == 0.0 and shadow(off)[0] == 0.0
+    assert shadow(np.array([[1 - MU + 1e6 / KMD, 0.0, 0.0]]))[0] == 1.0   # в полной тени
+    assert abs(RE / KM / ((696000.0 - RE / KM) / (AU / KM)) - 1.383e6) < 2e3  # конец umbra
     print("self_check OK: v_NOO, L2, C(L2), e=0 предельный случай, замыкание гало,")
     print("  интеграл Якоби, dv1")
 
@@ -305,30 +376,68 @@ def main():
           % ((MU / 3)**(1 / 3) * KMD, LAMBDA))
     print("   omega_z = %.4f (вертикальный период %.1f сут)"
           % (W_VERT, 2 * np.pi / W_VERT * DAY))
-    print("НОО: r = %.0f km, v_krug = %.4f km/s, v_II косм = %.4f km/s, i = %.1f deg"
-          % ((RE + H_PARK) / KM, V_LEO * V_U, V_LEO * np.sqrt(2) * V_U, np.degrees(I_PARK)))
+    print("НОО: r = %.0f km, v_krug = %.4f km/s, v_II косм = %.4f km/s" %
+          ((RE + H_PARK) / KM, V_LEO * V_U, V_LEO * np.sqrt(2) * V_U))
+    print("     площадка %s: i = %.1f deg (прямой старт), плоскость трассы наклонена"
+          % (SITE, I_LEO))
+    print("     к эклиптике не более чем на %.1f deg (i - eps_эклиптики)" %
+          np.degrees(I_ECL))
     print("=" * 78)
 
-    fam = halo_family(np.linspace(3e-5, 9e-4, 10), n=480)
+    z_free = halo_zmin()                      # порог по самой орбите, не по геометрии
+    zs = np.sort(np.append(np.linspace(3e-5, 9e-4, 10), 2.0 * z_free))
+    fam = halo_family(zs, n=480)
+    free = [o for o in fam if o["sh_pen"] == 0.0]      # без затмений вовсе
     print("Семейство гало-орбит у L2 (тип орбиты выбирается расчётом):")
-    print("    Az, km      Ax, km    период, сут        C       min r(Земля), km  v, km/s")
+    print("    Az, km      Ax, km   период,сут        C      min r(Земля), km  v, km/s"
+          "   тень, % орбиты")
     for o in fam:
-        print("  %8.0f %10.0f %11.1f  %.7f %16.0f     %6.3f"
+        print("  %8.0f %10.0f %10.1f  %.7f %16.0f     %6.3f   полн %5.1f  полутень %5.1f"
               % (o["z"] * KMD, o["Ax"] * KMD, o["T"] * DAY, o["C"],
-                 o["rmin"] * KMD, np.linalg.norm(o["s0"][3:6]) * V_U))
+                 o["rmin"] * KMD, np.linalg.norm(o["s0"][3:6]) * V_U,
+                 100 * o["sh_umb"], 100 * o["sh_pen"]))
+    print("   конус тени: полная тень кончается в %.0f km за Землёй (L2 - %.0f km),"
+          % (RE / KM / ((696000.0 - RE / KM) / (AU / KM)), RHO * KMD))
+    print("   радиус полутени на расстоянии L2 - %.0f km (угловое условие: разделение"
+          % R_PEN_L2)
+    print("   центров Солнца и Земли > %.3f deg): в неё попадает любая орбита, у которой"
+          % np.degrees((696000.0 + RE / KM) / (AU / KM) + RE / KM / (RHO * KMD)))
+    print("   min расстояние до оси Солнце-Земля меньше %.0f km (rho_min ~ Az)."
+          % R_PEN_L2)
+    print("   порог по расчитанной орбите (бинарный поиск): Az_min = %.0f km."
+          % (z_free * KMD))
+    print("   без затмений в семье: %s" % (", ".join("%.0f" % (oo["z"] * KMD) for oo in free)
+                                           or "нет - самая крупная Az = %.0f km"
+                                               % (fam[-1]["z"] * KMD)))
+    print("   взята орбита с Az = 2x Az_min (%.0f km): запас на ±1.7%%"
+          % (2 * z_free * KMD))
+    print("   изменения расстояния Солнце-Земля за год и на наклон трассы.")
+    pool = free or fam          # если затмений не избежать - выбирать по одному dv
 
-    r, coarse = aim_transfer(fam)
+    r, coarse = aim_transfer(fam, pool=pool)
     o = r["orb"]
     print("-" * 78)
-    print("Грубый перебор: dv1 = %.1f m/s, dv2 = %.1f m/s, промах %.0f km (theta %.1f deg)"
-          % (coarse["dv1"] * V_U * 1000, coarse["dv2"] * V_U * 1000, coarse["gap"],
-             np.degrees(coarse["theta"])))
+    print("Грубый перебор (лучший по dv ход среди 16 углов старта):")
+    print("  целевая Az, km   dv1, m/s   dv2, m/s   промах, km   тень")
+    for oo in fam:
+        b = oo["best"]
+        print("  %14.0f %9.1f %9.1f %12.0f   %s"
+              % (oo["z"] * KMD, b["dv1"] * V_U * 1000, b["dv2"] * V_U * 1000, b["gap"],
+                 "нет" if oo["sh_pen"] == 0 else "есть"))
+    cmin = min(fam, key=lambda o: o["best"]["tot"])
+    print("  минимум грубого перебора (dv + штраф за промах) по всей семье:"
+          " Az = %.0f km, dv = %.1f m/s (промах %.0f km)"
+          % (cmin["z"] * KMD, (cmin["best"]["dv1"] + cmin["best"]["dv2"]) * V_U * 1000,
+             cmin["best"]["gap"]))
     print("-" * 78)
     print("ПЕРЕЛЁТ НОО -> гало у L2 (два импульса):")
     print("  целевая орбита: Az = %.0f km, Ax = %.0f km, период = %.1f сут, C = %.7f"
           % (o["z"] * KMD, o["Ax"] * KMD, o["T"] * DAY, o["C"]))
-    print("  угол старта в плоскости НОО       = %6.1f deg (долгота узла выбрана под"
-          " разгон)" % np.degrees(r["theta"]))
+    print("  затмение на целевой орбите: полная тень %.1f%%, полутень %.1f%% орбиты,"
+          " min rho до оси S-Z = %.0f km"
+          % (100 * o["sh_umb"], 100 * o["sh_pen"], o["rho_min"]))
+    print("  угол старта в плоскости НОО       = %6.1f deg (плоскость содержит"
+          " направление на L2)" % np.degrees(r["theta"]))
     print("  скорость после 1-го импульса      = %.4f km/s (НОО %.4f)"
           % (r["u"] * V_U, V_LEO * V_U))
     print("  dv1 (разгонный)                   = %8.1f m/s" % (r["dv1"] * V_U * 1000))
@@ -342,12 +451,32 @@ def main():
           % ((r["dv1"] + r["dv2"]) * V_U * 1000))
 
     print("-" * 78)
-    print("Масса КА = %.0f kg (по заданию);  m_топл = m0*(1 - exp(-dv/(Isp*g0))):" % M_SC)
-    for isp in (220.0, 311.0, 330.0):
-        dv = (r["dv1"] + r["dv2"]) * V_U * 1000
-        mp = M_SC * (1 - np.exp(-dv / (isp * 9.80665)))
-        print("  Isp = %5.0f s  ->  топливо %6.0f kg, сухая масса %6.0f kg"
-              % (isp, mp, M_SC - mp))
+    dv_rb = (r["dv1"] + r["dv2"]) * V_U * 1000      # перелёт целиком делает разгонный блок
+    print("МАССА (по заданию: сухая масса КА %.0f kg; перелёт - РБ %s, удержание - %s):"
+          % (M_DRY, RB["name"], SKT["name"]))
+    print("  dv разгонного блока = dv1 + dv2 = %.0f m/s; с запасом 5%% на бюджет: %.0f m/s"
+          % (dv_rb, 1.05 * dv_rb))
+    print("  удержание: m_кс = m_сух*(1 - exp(-dv_sk/(Isp_СПД*g0))), Isp_СПД = %.0f s,"
+          " тяга %.0f mN:" % (SKT["ISP"], 1000 * SKT["F"]))
+    for sk_dv in (10.0, SKT["CAP_Y"], SKT["CAP_Y"] * SKT["LIFE_Y"]):
+        m_x = M_DRY * (1 - np.exp(-sk_dv / (SKT["ISP"] * G0)))
+        print("    dv_удержания %5.0f m/s -> ксенон %5.1f kg, часы работы %5.0f ч,"
+              " импульс %.2f MN*s"
+              % (sk_dv, m_x, M_DRY * sk_dv / SKT["F"] / 3600.0,
+                 M_DRY * sk_dv / 1e6))
+    m_x = M_DRY * (1 - np.exp(-(SKT["LIFE_Y"] * 10.0) / (SKT["ISP"] * G0)))
+    m_sc = M_DRY + m_x                              # масса КА на момент включения dv1
+    print("  принята заправка ксенонном %.1f kg (удержание ~10 m/s за миссию, см."
+          " perturb.txt) -> масса КА %6.0f kg" % (m_x, m_sc))
+    mp_nom = (m_sc + RB["M_DRY"]) * (np.exp(dv_rb / (RB["ISP"] * G0)) - 1)
+    print("  РБ: m_топл = (m_КА + m_сух_РБ)*(exp(dv/(Isp*g0)) - 1), m_сух_РБ = %.0f kg"
+          " (АССУМPTION, ТТД КВТК не подтверждены):" % RB["M_DRY"])
+    for isp in (RB["ISP"] - 10, RB["ISP"], RB["ISP"] + 10):
+        for dv, tag in ((dv_rb, "расчёт"), (1.05 * dv_rb, "запас 5%")):
+            mp = (m_sc + RB["M_DRY"]) * (np.exp(dv / (isp * G0)) - 1)
+            print("    Isp_РБ = %3.0f s, dv = %4.0f m/s (%s): топливо РБ %5.0f kg,"
+                  " ввести на НОО %5.0f kg"
+                  % (isp, dv, tag, mp, m_sc + RB["M_DRY"] + mp))
 
     print("-" * 78)
     s0 = dep_state(r["theta"], r["u"])
@@ -371,14 +500,17 @@ def main():
     print("-" * 78)
     print("ОТВЕТ: dv1 = %.0f m/s (разгонный с НОО), dv2 = %.0f m/s (тормозной, выход на"
           % (r["dv1"] * V_U * 1000, r["dv2"] * V_U * 1000))
-    print("  гало у L2), суммарно dv = %.0f m/s; перелёт %.0f сут; топливо %.0f-%.0f kg"
-          % ((r["dv1"] + r["dv2"]) * V_U * 1000, r["tof"],
-             M_SC * (1 - np.exp(-(r["dv1"] + r["dv2"]) * V_U * 1000 / (330 * 9.80665))),
-             M_SC * (1 - np.exp(-(r["dv1"] + r["dv2"]) * V_U * 1000 / (220 * 9.80665)))))
-    print("  Давление Солнца, Луна (наклонение, эксцентриситет, прецессии узла и апсид),")
-    print("  эксцентриситет орбиты Земли посчитаны в l2_perturb.py на этой же трассе;")
-    print("  там же оценки J2/площадки и удержания на гало (perturb.txt). Влияние на")
-    print("  dv1: SRP и Луна - ~0, эксцентриситет Земли +33 м/с; всё остальное в dv2.")
+    print("  гало у L2), суммарно dv = %.0f m/s; перелёт %.0f сут; целевая орбита"
+          " Az = %.0f km (без затмений)"
+          % ((r["dv1"] + r["dv2"]) * V_U * 1000, r["tof"], o["z"] * KMD))
+    print("  масса: сухая КА %.0f kg, ксенон %.1f kg, топливо РБ %.0f kg (Isp %.0f s),"
+          % (M_DRY, m_x, mp_nom, RB["ISP"]))
+    print("  ввести на НОО %.0f kg; dv удержания ~0.8 m/s/год - на 2 порядка ниже"
+          % (m_sc + RB["M_DRY"] + mp_nom))
+    print("  лимита 100 m/s/год (см. l2_perturb.py).")
+    print("  Давление Солнца, Луна (круговая орбита в эклиптике - форма и прецессии")
+    print("  исключены по заданию), эксцентриситет орбиты Земли, наклонённая плоскость")
+    print("  выведения и удержание на гало посчитаны в l2_perturb.py на этой же трассе.")
 
 
 if __name__ == "__main__":
