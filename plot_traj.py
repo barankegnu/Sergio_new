@@ -10,15 +10,15 @@ l2_perturb.py и make_docx.js): трасса интегрируется той �
 Раньше всё было на одном авто-масштабном кадре с equal aspect - и это был неправильный
 с бюджетом кадра выбор: трасса 38 % времени проводит со стороны Солнца (xi до -997 тыс.
 км), eta доходит до 961 тыс. км, тогда как НОО это 6,6 тыс. км, а полутень Земли у L2 -
-13,4 тыс. км, т.е. доли процента кадра. Поэтому теперь четыре рисунка с прицельными
+13,4 тыс. км, т.е. доли процента кадра. Поэтому теперь семь односюжетных рисунков с прицельными
 осями:
 
-  fig1_overview.png  рис. 1 - весь перелёт сверху (обзор, масштаб указан)
-  fig2_zoom.png      рис. 2 - два зума: старт у Земли (а) и цель - гало с точкой входа (б)
-  fig3_shadow.png    рис. 3 - разрез xz с конусом полутени (а) и rho(t) против r_pen(t) (б)
-  fig4_profile.png   рис. 4 - ход перелёта: xi(t) (а) и |v|(t) против орбитальной (б)
+  fig1_overview  весь перелёт сверху;  fig2_start  старт (первые 150 тыс. км);
+  fig3_entry   подлёт и точка входа;     fig4_xz    разрез xz с конусом полутени;
+  fig5_shadow  rho(t) против границы полутени; fig6_xi, fig7_v - ход xi(t) и |v|(t)
 
-Запуск:  python3 plot_traj.py        (-> четыре .png, ~30 с)
+
+Запуск:  python3 plot_traj.py        (-> семь .png, ~35 с)
 """
 import re
 import numpy as np
@@ -74,10 +74,12 @@ v_orb_in = np.linalg.norm(orb["V"][j_in]) * L.V_U
 BRK = "тормозной" if num(r"превышение скорости трассы над орбитой = ([-\d.]+) мм/с") >= 0 \
     else "разгонный"
 MOON = 384400.0 / 1e3
+X0 = (tr0[0] - (1 - L.MU)) * L.KMD / 1e3
+Y0 = tr0[1] * L.KMD / 1e3
+k0 = int(np.argmax(X > 1150)) if (X > 1150).any() else 0
 
 
 def frame(a, xlab, ylab, title):
-    """подписи осей + заголовок + сетка одной строкой"""
     a.set_xlabel(xlab); a.set_ylabel(ylab); a.set_title(title); a.grid(alpha=.35)
 
 
@@ -85,7 +87,11 @@ def earth(a):
     a.plot(0, 0, "o", ms=9, mfc="tab:orange", mec="k", mew=.7, zorder=5)
 
 
-# ---------------- рис. 1: обзор ------------------------------------------------------
+def save(fig, name):
+    fig.tight_layout(pad=0.55); fig.savefig(name); plt.close(fig)
+
+
+# = рис. 1: обзор всего перелёта ======================================================
 fig, a = plt.subplots(figsize=(6.4, 4.6))
 a.plot(X, Y, "-", lw=2.0, color="tab:blue", zorder=3, label="трасса перелёта")
 a.plot(HX, HY, "-", lw=1.8, color="tab:green", zorder=3, label="гало у L2 (цель)")
@@ -93,110 +99,122 @@ a.add_patch(plt.Circle((0, 0), MOON, fill=False, ls=":", lw=1.1, color="0.45"))
 a.text(MOON * .55, -MOON * .82, "орбита Луны", fontsize=10, color="0.35", rotation=-25)
 earth(a)
 a.plot(L.RHO * L.KMD / 1e3, 0, "x", ms=11, mew=2.2, color="tab:red", zorder=5, label="L2")
-a.annotate("Земля", (0, 0), xytext=(60, 190), fontsize=10,
-           arrowprops=dict(arrowstyle="->", lw=1))
+a.annotate("Земля", (0, 0), xytext=(60, 190), fontsize=10, arrowprops=dict(arrowstyle="->", lw=1))
 a.annotate("вход на гало", (X[-1], Y[-1]), xytext=(X[-1] - 520, Y[-1] - 330), fontsize=10,
            arrowprops=dict(arrowstyle="->", lw=1))
-a.annotate("", xy=(-1150, 0), xytext=(-870, 0),
-           arrowprops=dict(arrowstyle="->", lw=1.6, color="0.3"))
+a.annotate("", xy=(-1150, 0), xytext=(-870, 0), arrowprops=dict(arrowstyle="->", lw=1.6, color="0.3"))
 a.text(-1140, 60, "к Солнцу", fontsize=10, color="0.3")
 a.set_xlim(-1250, 1800); a.set_ylim(-1150, 1150); a.set_aspect("equal")
 frame(a, "\u03be от Земли, тыс. км", "\u03b7 (в эклиптике), тыс. км",
       "Рис. 1. Весь перелёт: вид сверху на эклиптику")
 a.legend(fontsize=10, loc="lower left")
-fig.tight_layout(pad=0.5); fig.savefig("fig1_overview.png"); plt.close(fig)
+save(fig, "fig1_overview.png")
 
-# ---------------- рис. 2: два прицельных зума ---------------------------------------
-fig, (a1, a2) = plt.subplots(1, 2, figsize=(9.4, 4.4))
-X0 = (tr0[0] - (1 - L.MU)) * L.KMD / 1e3
-Y0 = tr0[1] * L.KMD / 1e3
-a1.plot(X0, Y0, "-", lw=2.2, color="tab:blue")
+# = рис. 2: старт =====================================================================
+fig, a = plt.subplots(figsize=(5.2, 4.6))
+a.plot(X0, Y0, "-", lw=2.4, color="tab:blue", label="первые %.0f тыс. км пути" % R_ZOOM)
 th = np.linspace(0, 2 * np.pi, 200)
-th = np.linspace(0, 2 * np.pi, 200)
-a1.plot(LEO_R / 1e3 * np.cos(th), LEO_R / 1e3 * np.sin(th), "-", lw=1.8, color="k",
-        label="НОО 200 км (r = %.1f тыс. км)" % (LEO_R / 1e3))
-a1.add_patch(plt.Circle((0, 0), AZ_MIN / 2e3, fill=True, color="0.82", alpha=.9, lw=0,
-                        label="полутень Земли у L2 (13,4 тыс. км)"))
-earth(a1)
+a.plot(LEO_R / 1e3 * np.cos(th), LEO_R / 1e3 * np.sin(th), "-", lw=2.0, color="k",
+       label="НОО 200 км (r = %.1f тыс. км)" % (LEO_R / 1e3))
+a.add_patch(plt.Circle((0, 0), AZ_MIN / 2e3, fill=True, color="0.82", alpha=.9, lw=0,
+                       label="полутень Земли у L2 (%.1f тыс. км)" % (AZ_MIN / 1e3)))
+earth(a)
 lim = R_ZOOM * 1.15
-a1.set_xlim(-lim, lim); a1.set_ylim(-lim, lim); a1.set_aspect("equal")
-frame(a1, "\u03be, тыс. км", "\u03b7, тыс. км", "а) старт: НОО и начало трассы")
-a1.legend(fontsize=8.5, loc="upper left")
-a1.text(lim * .42, -lim * .78, "первые %.0f тыс. км пути\n(ночная сторона Земли)" % R_ZOOM,
-        fontsize=9, color="0.25")
+a.set_xlim(-lim, lim); a.set_ylim(-lim, lim); a.set_aspect("equal")
+frame(a, "\u03be, тыс. км", "\u03b7, тыс. км", "Рис. 2. Старт: НОО и начало трассы")
+a.legend(fontsize=9, loc="upper left")
+a.text(lim * .30, -lim * .80, "включение 1-го импульса -\nс ночной стороны Земли",
+       fontsize=9, color="0.25")
+save(fig, "fig2_start.png")
 
-a2.plot(HX, HY, "-", lw=2.0, color="tab:green", label="гало (цель)")
-k0 = int(np.argmax(X > 1150)) if (X > 1150).any() else 0
-a2.plot(X[k0:], Y[k0:], "-", lw=2.2, color="tab:blue",
-        label="подлёт к гало (ξ > 1,15 млн км)")
-a2.plot(X[-1], Y[-1], "*", ms=16, color="tab:red", mec="k", mew=.6, zorder=5,
-        label="точка входа (промах %.0f км)" % num(r"промах по месту прицеливания\s*=\s*(\d+) km"))
-a2.plot(L.RHO * L.KMD / 1e3, 0, "x", ms=11, mew=2.2, color="tab:red")
-a2.text(L.RHO * L.KMD / 1e3 - 40, 70, "L2", fontsize=10, color="tab:red")
-a2.set_xlim(1180, 1760); a2.set_ylim(-760, 760); a2.set_aspect("equal")
-frame(a2, "\u03be, тыс. км", "\u03b7, тыс. км",
-      "б) цель: гало Az = %.0f тыс. км и вход на него" % (Z_TGT * L.KMD / 1e3))
-a2.legend(fontsize=8.5, loc="lower left")
-fig.tight_layout(pad=0.6); fig.savefig("fig2_zoom.png"); plt.close(fig)
+# = рис. 3: подлёт и вход на гало =====================================================
+fig, a = plt.subplots(figsize=(6.0, 4.4))
+a.plot(HX, HY, "-", lw=2.0, color="tab:green", label="гало (цель)")
+a.plot(X[k0:], Y[k0:], "-", lw=2.4, color="tab:blue",
+       label="подлёт (\u03be > 1,15 млн км)")
+a.plot(X[-1], Y[-1], "*", ms=17, color="tab:red", mec="k", mew=.6, zorder=5,
+       label="точка входа, промах %s км" % re.search(r"промах по месту прицеливания\s*=\s*(\d+) km", RES).group(1))
+a.plot(L.RHO * L.KMD / 1e3, 0, "x", ms=11, mew=2.2, color="tab:red")
+a.text(L.RHO * L.KMD / 1e3 - 45, 70, "L2", fontsize=10, color="tab:red")
+a.set_xlim(1180, 1760); a.set_ylim(-760, 760); a.set_aspect("equal")
+frame(a, "\u03be, тыс. км", "\u03b7, тыс. км",
+      "Рис. 3. Цель: гало Az = %.0f тыс. км и вход на него" % (Z_TGT * L.KMD / 1e3))
+a.legend(fontsize=9, loc="lower left")
+save(fig, "fig3_entry.png")
 
-# ---------------- рис. 3: тень -------------------------------------------------------
-fig, (a1, a2) = plt.subplots(1, 2, figsize=(9.4, 4.0))
+# = рис. 4: разрез xz с конусом полутени =============================================
+fig, a = plt.subplots(figsize=(6.6, 3.9))
 xi = np.linspace(0, 1750, 400)
 rp = (L.RE / L.KM + (696000.0 + L.RE / L.KM) / (L.AU / L.KM) * xi * 1e3) / 1e3
-a1.fill_between(xi, -rp, rp, color="0.8", alpha=.95, lw=0, label="конус полутени Земли")
-a1.plot(HX, HZ, "-", lw=1.9, color="tab:green", label="гало")
-a1.plot(X, Z, "-", lw=2.0, color="tab:blue", label="трасса")
+a.fill_between(xi, -rp, rp, color="0.8", alpha=.95, lw=0, label="конус полутени Земли")
+a.plot(HX, HZ, "-", lw=2.0, color="tab:green", label="гало")
+a.plot(X, Z, "-", lw=2.1, color="tab:blue", label="трасса")
 for s in (1, -1):
-    a1.axhline(s * AZ_MIN / 1e3, ls="--", lw=1.3, color="k")
-a1.text(1200, AZ_MIN / 1e3 * 1.18, "порог выхода из тени Az$_{min}$ = %.1f тыс. км"
-        % (AZ_MIN / 1e3), fontsize=9.5)
-a1.annotate("тень у оси S-З\nвсего \u00b113,4 тыс. км", (1400, 8), xytext=(950, 135),
-            fontsize=9.5, arrowprops=dict(arrowstyle="->", lw=1))
-earth(a1)
-a1.set_xlim(-1050, 1780); a1.set_ylim(-260, 260)
-frame(a1, "\u03be от Земли, тыс. км", "\u03b6 (вверх от эклиптики), тыс. км",
-      "а) разрез xz (оси в масштабе между собой не выдержаны)")
-a1.legend(fontsize=9, loc="lower left")
-a2.plot(t_d, RHOkm / 1e3, lw=2.1, color="tab:blue", label="\u03c1 до оси Солнце\u2014Земля")
-a2.plot(t_d, r_pen, lw=1.8, color="0.35", ls=":", label="r$_{pen}$(\u03be) — граница полутени")
-a2.fill_between(t_d, 1e-1, np.where(in_pen, r_pen, 1e-1), color="0.8", lw=0,
-                label="тень: %.2f %% времени (%d выборок)" % (100 * in_pen.mean(), in_pen.sum()))
-a2.set_yscale("log"); a2.set_ylim(1, 1200)
-frame(a2, "время, сут", "\u03c1, тыс. км", "б) затенение вдоль трассы (лог-шкала)")
-a2.legend(fontsize=9, loc="upper right")
-fig.tight_layout(pad=0.6); fig.savefig("fig3_shadow.png"); plt.close(fig)
+    a.axhline(s * AZ_MIN / 1e3, ls="--", lw=1.4, color="k")
+a.text(1200, AZ_MIN / 1e3 * 1.25, "порог выхода из тени Az_min = %.1f тыс. км" % (AZ_MIN / 1e3),
+       fontsize=9.5)
+a.annotate("сама полутень у L2 -\nвсего \u00b113,4 тыс. км", (1400, 8), xytext=(930, 140),
+           fontsize=9.5, arrowprops=dict(arrowstyle="->", lw=1))
+earth(a)
+a.set_xlim(-1050, 1780); a.set_ylim(-260, 260)
+frame(a, "\u03be от Земли, тыс. км", "\u03b6 (вверх от эклиптики), тыс. км",
+      "Рис. 4. Разрез xz (оси в масштабе между собой не выдержаны)")
+a.legend(fontsize=9.5, loc="lower left")
+save(fig, "fig4_xz.png")
 
-# ---------------- рис. 4: ход перелёта ----------------------------------------------
-fig, (a1, a2) = plt.subplots(2, 1, figsize=(6.6, 6.0))
-a1.plot(t_d, X, lw=2.1, color="tab:blue")
-a1.axhline(L.RHO * L.KMD / 1e3, ls=":", lw=1.5, color="tab:red")
-a1.text(6, L.RHO * L.KMD / 1e3 * 1.04, "L2 (%.0f тыс. км)" % (L.RHO * L.KMD / 1e3),
-        color="tab:red", fontsize=10)
-a1.axhline(0, lw=.8, color="0.4")
-a1.text(6, 40, "орбита Земли: \u03be < 0 — трасса со стороны Солнца (%.0f %% времени)"
-        % (100 * (X < 0).mean()), fontsize=9.5, color="0.25")
-frame(a1, "время, сут", "\u03be за Землёй, тыс. км", "Рис. 4. Ход перелёта")
-a2.set_yscale("log")
-a2.plot(t_d, V, lw=2.1, color="tab:blue", label="трасса (вращающийся кадр)")
-a2.plot(np.linspace(0.0, orb["T"] * L.DAY, len(HX)), np.linalg.norm(orb["V"], axis=1) * L.V_U,
-        lw=1.7, color="tab:green", label="скорость на целевой орбите")
-a2.axhline(v_orb_in, ls="-.", lw=1.5, color="tab:green")
-a2.axvline(t_d[-1], ls="--", lw=1.4, color="k")
-a2.annotate("вход: %s\n|v| трассы %.3f против %.3f км/с" % (BRK, V[-1], v_orb_in),
-            xy=(t_d[-1], V[-1]), xytext=(t_d[-1] * .30, max(V[-1] * .22, 0.09)), fontsize=10,
-            arrowprops=dict(arrowstyle="->", lw=1))
-a2.set_xlabel("время, сут"); a2.set_ylabel("|v|, км/с (лог-шкала)")
-a2.grid(alpha=.35, which="both"); a2.legend(fontsize=10, loc="upper right")
-fig.tight_layout(pad=0.7); fig.savefig("fig4_profile.png"); plt.close(fig)
+# = рис. 5: затенение вдоль трассы ====================================================
+fig, a = plt.subplots(figsize=(6.2, 3.6))
+a.plot(t_d, RHOkm / 1e3, lw=2.2, color="tab:blue", label="\u03c1 до оси Солнце\u2014Земля")
+a.plot(t_d, r_pen, lw=1.9, color="0.35", ls=":", label="r$_{pen}$(\u03be) — граница полутени")
+a.fill_between(t_d, 1e-1, np.where(in_pen, r_pen, 1e-1), color="0.8", lw=0,
+               label="тень: %.2f %% времени (%d выборок)" % (100 * in_pen.mean(), in_pen.sum()))
+a.set_yscale("log"); a.set_ylim(1, 1200)
+frame(a, "время, сут", "\u03c1, тыс. км", "Рис. 5. Затенение на перелёте (лог-шкала)")
+a.legend(fontsize=9.5, loc="upper right")
+save(fig, "fig5_shadow.png")
 
-# панельные проверки: рисунок, в который данные не влезли, выглядит правдоподобно
-assert len(X0) > 50 and np.hypot(X0, Y0).max() <= R_ZOOM * 1.35, "зум старта пуст"
-assert 1100 <= X[k0:].min() and X[k0:].max() <= 1800, "хвост вышел за окно панели (б)"
-assert min(V) < v_orb_in < max(V), "|v| цели вне диапазона трассы"
-print("fig1_overview.png fig2_zoom.png fig3_shadow.png fig4_profile.png")
-print("  тоф %.1f сут, dv1 %.1f м/с, dv2 %.1f м/с (%s), трасса: xi %.0f..%.0f тыс. км,"
+# = рис. 6: ход xi(t) ================================================================
+fig, a = plt.subplots(figsize=(6.2, 3.4))
+a.plot(t_d, X, lw=2.2, color="tab:blue")
+a.axhline(L.RHO * L.KMD / 1e3, ls=":", lw=1.6, color="tab:red")
+a.text(6, L.RHO * L.KMD / 1e3 * 1.04, "L2 (%.0f тыс. км)" % (L.RHO * L.KMD / 1e3),
+       color="tab:red", fontsize=10)
+a.axhline(0, lw=.9, color="0.4")
+a.text(6, 60, "ниже нуля - трасса со стороны Солнца (%.0f %% времени)" % (100 * (X < 0).mean()),
+       fontsize=9.5, color="0.25")
+a.axvline(t_d[-1], ls="--", lw=1.3, color="k")
+a.text(t_d[-1] * .97, X.min() * .55, "вход\nна гало", fontsize=9.5, ha="right")
+frame(a, "время, сут", "\u03be за Землёй, тыс. км", "Рис. 6. Ход перелёта: расстояние \u03be(t)")
+save(fig, "fig6_xi.png")
+
+# = рис. 7: ход |v|(t) ==============================================================
+fig, a = plt.subplots(figsize=(6.2, 3.6))
+a.plot(t_d, V, lw=2.2, color="tab:blue", label="трасса (вращающийся кадр)")
+a.plot(np.linspace(0.0, orb["T"] * L.DAY, len(HX)),
+       np.linalg.norm(orb["V"], axis=1) * L.V_U, lw=1.8, color="tab:green",
+       label="скорость на целевой орбите")
+a.axhline(v_orb_in, ls="-.", lw=1.6, color="tab:green")
+a.axvline(t_d[-1], ls="--", lw=1.4, color="k")
+a.annotate("вход: %s\n|v| трассы %.3f против %.3f км/с" % (BRK, V[-1], v_orb_in),
+           xy=(t_d[-1], V[-1]), xytext=(t_d[-1] * .30, max(V[-1] * .22, 0.09)), fontsize=10,
+           arrowprops=dict(arrowstyle="->", lw=1))
+a.set_yscale("log")
+frame(a, "время, сут", "|v|, км/с (лог-шкала)", "Рис. 7. Скорость: |v|(t) и скорость орбиты в точке касания")
+a.set_ylim(min(V) * .8, max(V) * 1.4)
+a.legend(fontsize=9.5, loc="upper right")
+save(fig, "fig7_v.png")
+
+# ---- проверки: в каждый кадр данные должны попадать ================================
+assert len(X0) > 50 and np.hypot(X0, Y0).max() <= R_ZOOM * 1.35, "рис. 2: старт пуст"
+assert 1100 <= X[k0:].min() and X[k0:].max() <= 1800, "рис. 3: подлёт вышел за окно"
+assert -260 < min(Z.min(), HZ.min()) and max(Z.max(), HZ.max()) < 260, "рис. 4: данные вне осей"
+assert 1 < RHOkm.min() / 1e3 < 1200, "рис. 5: rho вне лог-шкалы"
+assert min(V) < v_orb_in < max(V), "рис. 7: |v| цели вне диапазона трассы"
+
+print("рис. 1-7: fig1_overview fig2_start fig3_entry fig4_xz fig5_shadow fig6_xi fig7_v")
+print("  тоф %.1f сут, dv1 %.1f м/с, dv2 %.1f м/с (%s); трасса xi %.0f..%.0f тыс. км,"
       " %d %% времени со стороны Солнца"
       % (TOF * L.DAY, (u - L.V_LEO) * L.V_U * 1000, num(r"dv2 \(второй импульс\)\s*=\s*([\d.]+)"),
          BRK, X.min(), X.max(), round(100 * (X < 0).mean())))
-print("  тень на перелёте %.2f%% (%d выборок), rho_min %.0f км, порог Az_min %.0f км"
-      % (100 * in_pen.mean(), in_pen.sum(), RHOkm.min(), AZ_MIN))
+print("  тень на перелёте %.2f%% (%d выборок), rho_min %.0f км, порог Az_min %.0f км,"
+      " точек старта %d" % (100 * in_pen.mean(), in_pen.sum(), RHOkm.min(), AZ_MIN, len(X0)))
