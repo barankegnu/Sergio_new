@@ -139,7 +139,7 @@ a.text(*TXT2, "включение 1-го импульса - с ночной ст
 save(fig, "fig2_start.png")
 
 # = рис. 3: подлёт и вход на гало =====================================================
-fig, a = plt.subplots(figsize=(7.0, 4.4))
+fig, a = plt.subplots(figsize=(9.8, 4.4))          # сетка в ~2 раза шире по X
 a.plot(HX, HY, "-", lw=2.0, color="tab:green", label="гало (цель)")
 a.plot(X[k0:], Y[k0:], "-", lw=2.4, color="tab:blue",
        label="подлёт (\u03be > 1,15 млн км)")
@@ -147,12 +147,22 @@ a.plot(X[-1], Y[-1], "*", ms=17, color="tab:red", mec="k", mew=.6, zorder=5,
        label="точка входа, промах %s км" % re.search(r"промах по месту прицеливания\s*=\s*(\d+) km", RES).group(1))
 a.plot(L.RHO * L.KMD / 1e3, 0, "x", ms=11, mew=2.2, color="tab:red")
 a.text(L.RHO * L.KMD / 1e3 - 45, 70, "L2", fontsize=10, color="tab:red")
-XL3 = (min(X[k0], HX.min()) - 70, max(X[k0], HX.max()) + 700)   # +700 - полоса под легенду
-a.set_xlim(*XL3); a.set_ylim(-760, 760); a.set_aspect("equal", adjustable="box")
+# диапазон X держим ровно 1100..1700 тыс. км (как в данных), а свободу для легенды даёт
+# ширина самой рамки: холст вдвое шире прежнего, поэтому пропорция осей снята и помечена
+XL3 = (1100.0, 1700.0)
+YLO3 = min(HY.min(), Y[k0:].min()) - 300        # чистая полоса внизу - под легенду
+a.set_xlim(*XL3); a.set_ylim(YLO3, 760)
 frame(a, "\u03be, тыс. км", "\u03b7, тыс. км",
-      "Рис. 3. Цель: гало Az = %.0f тыс. км и вход на него" % (Z_TGT * L.KMD / 1e3))
+      "Рис. 3. Цель: гало Az = %.0f тыс. км и вход на него\n"
+      "(ось X = 1100..1700 тыс. км, сетка расширена вдвое, пропорция осей не выдержана)"
+      % (Z_TGT * L.KMD / 1e3))
 LEG3 = a.legend(fontsize=9, loc="lower right", framealpha=.95)
 check_clear(fig, "рис. 3", LEG3, *a.texts)
+# под легендой не должно быть ни одной точки кривых - проверяем в координатах данных
+fig.canvas.draw()
+_bb = LEG3.get_window_extent(fig.canvas.get_renderer()).transformed(a.transData.inverted())
+_in = lambda xx, yy: np.all((xx > _bb.x0) & (xx < _bb.x1) & (yy > _bb.y0) & (yy < _bb.y1))
+assert not _in(HX, HY) and not _in(X[k0:], Y[k0:]), "рис. 3: легенда на кривых"
 save(fig, "fig3_entry.png")
 
 # = рис. 4: разрез xz с конусом полутени =============================================
@@ -166,10 +176,10 @@ for n, sg in enumerate((1, -1)):
     a.axhline(sg * AZ_MIN / 1e3, ls="--", lw=1.4, color="k",
               label="порог Az_min = %.1f тыс. км" % (AZ_MIN / 1e3)
               if sg > 0 else "_nolegend_")
-TXT4 = (1990, 0)               # правая полоса: за x = 1700 данных нет ни на какой высоте
+TXT4 = (1990, 250)             # правый верхний угол: за x = 1700 данных нет вообще
 TX4 = a.text(*TXT4, "у самой оси Солнце-Земля полутень Земли\nвсего \u00b113,4 тыс. км у L2;"
          " гало: min \u03c1 = %.1f тыс. км" % (orb["rho_min"] / 1e3),
-         fontsize=9.5, color="0.15", ha="right", va="center")
+         fontsize=9.5, color="0.15", ha="right", va="top")
 earth(a)
 a.set_xlim(-1100, 2000); a.set_ylim(-260, 260)
 frame(a, "\u03be от Земли, тыс. км", "\u03b6 (вверх от эклиптики), тыс. км",
@@ -228,8 +238,10 @@ assert -260 < min(Z.min(), HZ.min()) and max(Z.max(), HZ.max()) < 260, "рис. 
 assert 1 < RHOkm.min() / 1e3 < 1200, "рис. 5: rho вне лог-шкалы"
 assert min(V) < v_orb_in < max(V), "рис. 7: |v| цели вне диапазона трассы"
 assert -lim < TXT2[1] < lim and abs(TXT2[0]) < lim, "рис. 2: подпись вне рамки"
-assert XL3[0] < X[k0] and X[-1] < XL3[1] - 500, "рис. 3: нет места под легенду"
-assert TXT4[0] > max(X.max(), HX.max()) + 100, "рис. 4: подпись легла на данные"
+assert XL3 == (1100.0, 1700.0) and X[k0] >= XL3[0] and HX.max() <= XL3[1],\
+       "рис. 3: данные вышли за фиксированное окно"
+assert TXT4[0] > max(X.max(), HX.max()) + 100 and TXT4[1] > max(Z.max(), HZ.max()),\
+       "рис. 4: подпись легла на данные"
 assert -260 < TXT4[1] < 260 and 1700 < TXT4[0] < 2000, "рис. 4: подпись вне рамки"
 
 print("рис. 1-7: fig1_overview fig2_start fig3_entry fig4_xz fig5_shadow fig6_xi fig7_v")
@@ -239,7 +251,7 @@ print("  тоф %.1f сут, dv1 %.1f м/с, dv2 %.1f м/с (%s); трасса x
          BRK, X.min(), X.max(), round(100 * (X < 0).mean())))
 print("  тень на перелёте %.2f%% (%d выборок), rho_min %.0f км, порог Az_min %.0f км,"
       " точек старта %d" % (100 * in_pen.mean(), in_pen.sum(), RHOkm.min(), AZ_MIN, len(X0)))
-print("  окна: рис.3 x = %.0f..%.0f (данные до %.0f, полоса под легенду %.0f тыс. км);"
-      " рис.4 подпись при x = %.0f против данных до %.0f"
-      % (XL3[0], XL3[1], max(X[-1], HX.max()), XL3[1] - max(X[-1], HX.max()), TXT4[0],
-         max(X.max(), HX.max())))
+print("  окна: рис.3 x = %.0f..%.0f тыс. км (данные до %.0f), чистая полоса под легендой"
+      " %.0f тыс. км по \u03b7; рис.4 подпись при x = %.0f, данных нет правее %.0f"
+      % (XL3[0], XL3[1], max(X[-1], HX.max()), min(HY.min(), Y[k0:].min()) - YLO3,
+         TXT4[0], max(X.max(), HX.max())))
