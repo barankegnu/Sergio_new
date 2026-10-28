@@ -123,8 +123,9 @@ lim = R_ZOOM * 1.15
 a.set_xlim(-lim, lim); a.set_ylim(-lim, lim); a.set_aspect("equal")
 frame(a, "\u03be, тыс. км", "\u03b7, тыс. км", "Рис. 2. Старт: НОО и начало трассы")
 a.legend(fontsize=9, loc="upper left")
-a.text(lim * .30, -lim * .80, "включение 1-го импульса -\nс ночной стороны Земли",
-       fontsize=9, color="0.25")
+TXT2 = (0.0, -lim * .93)                       # вниз по центру, внутри рамки
+a.text(*TXT2, "включение 1-го импульса - с ночной стороны Земли", fontsize=9.5,
+       color="0.25", ha="center", va="bottom")
 save(fig, "fig2_start.png")
 
 # = рис. 3: подлёт и вход на гало =====================================================
@@ -136,10 +137,11 @@ a.plot(X[-1], Y[-1], "*", ms=17, color="tab:red", mec="k", mew=.6, zorder=5,
        label="точка входа, промах %s км" % re.search(r"промах по месту прицеливания\s*=\s*(\d+) km", RES).group(1))
 a.plot(L.RHO * L.KMD / 1e3, 0, "x", ms=11, mew=2.2, color="tab:red")
 a.text(L.RHO * L.KMD / 1e3 - 45, 70, "L2", fontsize=10, color="tab:red")
-a.set_xlim(1180, 1760); a.set_ylim(-760, 760); a.set_aspect("equal")
+XL3 = (min(X[k0], HX.min()) - 70, max(X[k0], HX.max()) + 70)
+a.set_xlim(*XL3); a.set_ylim(-760, 760); a.set_aspect("equal")
 frame(a, "\u03be, тыс. км", "\u03b7, тыс. км",
       "Рис. 3. Цель: гало Az = %.0f тыс. км и вход на него" % (Z_TGT * L.KMD / 1e3))
-a.legend(fontsize=9, loc="lower left")
+a.legend(fontsize=9, loc="lower right", framealpha=.95)
 save(fig, "fig3_entry.png")
 
 # = рис. 4: разрез xz с конусом полутени =============================================
@@ -149,14 +151,16 @@ rp = (L.RE / L.KM + (696000.0 + L.RE / L.KM) / (L.AU / L.KM) * xi * 1e3) / 1e3
 a.fill_between(xi, -rp, rp, color="0.8", alpha=.95, lw=0, label="конус полутени Земли")
 a.plot(HX, HZ, "-", lw=2.0, color="tab:green", label="гало")
 a.plot(X, Z, "-", lw=2.1, color="tab:blue", label="трасса")
-for s in (1, -1):
-    a.axhline(s * AZ_MIN / 1e3, ls="--", lw=1.4, color="k")
-a.text(1200, AZ_MIN / 1e3 * 1.25, "порог выхода из тени Az_min = %.1f тыс. км" % (AZ_MIN / 1e3),
-       fontsize=9.5)
-a.annotate("сама полутень у L2 -\nвсего \u00b113,4 тыс. км", (1400, 8), xytext=(930, 140),
-           fontsize=9.5, arrowprops=dict(arrowstyle="->", lw=1))
+for n, sg in enumerate((1, -1)):
+    a.axhline(sg * AZ_MIN / 1e3, ls="--", lw=1.4, color="k",
+              label="порог выхода из тени Az_min = %.1f тыс. км" % (AZ_MIN / 1e3)
+              if sg > 0 else "_nolegend_")
+TXT4 = (1900, -252)                            # вниз-внутрь, справа
+a.text(*TXT4, "у самой оси Солнце-Земля полутень\nЗемли: \u00b113,4 тыс. км у L2\n"
+       "гало: min \u03c1 = %.1f тыс. км" % (orb["rho_min"] / 1e3),
+       fontsize=9.5, color="0.15", ha="right", va="bottom")
 earth(a)
-a.set_xlim(-1050, 1780); a.set_ylim(-260, 260)
+a.set_xlim(-1100, 2000); a.set_ylim(-260, 260)
 frame(a, "\u03be от Земли, тыс. км", "\u03b6 (вверх от эклиптики), тыс. км",
       "Рис. 4. Разрез xz (оси в масштабе между собой не выдержаны)")
 a.legend(fontsize=9.5, loc="lower left")
@@ -170,7 +174,7 @@ a.fill_between(t_d, 1e-1, np.where(in_pen, r_pen, 1e-1), color="0.8", lw=0,
                label="тень: %.2f %% времени (%d выборок)" % (100 * in_pen.mean(), in_pen.sum()))
 a.set_yscale("log"); a.set_ylim(1, 1200)
 frame(a, "время, сут", "\u03c1, тыс. км", "Рис. 5. Затенение на перелёте (лог-шкала)")
-a.legend(fontsize=9.5, loc="upper right")
+a.legend(fontsize=9.5, loc="lower right", framealpha=.95)
 save(fig, "fig5_shadow.png")
 
 # = рис. 6: ход xi(t) ================================================================
@@ -210,6 +214,9 @@ assert 1100 <= X[k0:].min() and X[k0:].max() <= 1800, "рис. 3: подлёт �
 assert -260 < min(Z.min(), HZ.min()) and max(Z.max(), HZ.max()) < 260, "рис. 4: данные вне осей"
 assert 1 < RHOkm.min() / 1e3 < 1200, "рис. 5: rho вне лог-шкалы"
 assert min(V) < v_orb_in < max(V), "рис. 7: |v| цели вне диапазона трассы"
+assert -lim < TXT2[1] < lim and abs(TXT2[0]) < lim, "рис. 2: подпись вне рамки"
+assert XL3[0] < X[k0] and X[-1] < XL3[1], "рис. 3: вход вышел за расширенное окно"
+assert -260 < TXT4[1] < 260 and 1700 < TXT4[0] < 2000, "рис. 4: подпись вне рамки"
 
 print("рис. 1-7: fig1_overview fig2_start fig3_entry fig4_xz fig5_shadow fig6_xi fig7_v")
 print("  тоф %.1f сут, dv1 %.1f м/с, dv2 %.1f м/с (%s); трасса xi %.0f..%.0f тыс. км,"
